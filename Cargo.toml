@@ -1,0 +1,9 @@
+[package]
+name = "why_is_my_cipher_vulnerable_bro"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aes = "0.9.4"
+crossterm = "0.29.0"
+ratatui = "0.30.2"
