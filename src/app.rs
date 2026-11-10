@@ -1,4 +1,9 @@
-//! Application state: the four demo modes and transitions between them.
+//! Application state: the four demo modes, per-mode screens, and the
+//! dispatch that routes keys and ticks to the active mode only.
+
+use ratatui::crossterm::event::KeyEvent;
+
+use crate::modes;
 
 /// The four demo modes; order defines tab order and the `1`-`4` selection keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,18 +33,6 @@ impl Mode {
         }
     }
 
-    /// Placeholder copy describing the mode's planned purpose.
-    pub fn description(self) -> &'static str {
-        match self {
-            Mode::Autocrack => "Pick a victim cipher and watch the attack run with cool visuals.",
-            Mode::TrafficSimulator => "Pretend to intercept fake web traffic, then decrypt it.",
-            Mode::Lessons => {
-                "Cryptopals-style, step-by-step walk-throughs of why each cipher dies."
-            }
-            Mode::MathViews => "Graphs and matrices directly tied to the underlying math.",
-        }
-    }
-
     /// Position in [`ALL_MODES`]; also the mode's selection key minus one.
     pub fn index(self) -> usize {
         ALL_MODES
@@ -54,10 +47,15 @@ impl Mode {
     }
 }
 
-/// Mutable shell state shared by all modes.
+/// Mutable shell state: the active mode, global flags, and every mode's own
+/// screen state (inactive modes keep their state untouched).
 pub struct App {
     pub mode: Mode,
     pub should_quit: bool,
+    pub autocrack: modes::autocrack::State,
+    pub traffic: modes::traffic::State,
+    pub lessons: modes::lessons::State,
+    pub mathviews: modes::mathviews::State,
 }
 
 impl Default for App {
@@ -65,6 +63,10 @@ impl Default for App {
         Self {
             mode: Mode::Autocrack,
             should_quit: false,
+            autocrack: modes::autocrack::State::new(),
+            traffic: modes::traffic::State::new(),
+            lessons: modes::lessons::State::new(),
+            mathviews: modes::mathviews::State::new(),
         }
     }
 }
@@ -92,11 +94,37 @@ impl App {
     pub fn quit(&mut self) {
         self.should_quit = true;
     }
+
+    /// Route a non-global key press to the active mode's handler; inactive
+    /// modes never see keys.
+    pub fn mode_key(&mut self, key: KeyEvent) {
+        match self.mode {
+            Mode::Autocrack => self.autocrack.handle_key(key),
+            Mode::TrafficSimulator => self.traffic.handle_key(key),
+            Mode::Lessons => self.lessons.handle_key(key),
+            Mode::MathViews => self.mathviews.handle_key(key),
+        }
+    }
+
+    /// Drive the active mode's animation for one tick; inactive modes freeze.
+    pub fn tick(&mut self) {
+        match self.mode {
+            Mode::Autocrack => self.autocrack.tick(),
+            Mode::TrafficSimulator => self.traffic.tick(),
+            Mode::Lessons => self.lessons.tick(),
+            Mode::MathViews => self.mathviews.tick(),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
 
     #[test]
     fn next_cycles_forward() {
@@ -149,5 +177,38 @@ mod tests {
         assert!(!app.should_quit);
         app.quit();
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn mode_keys_reach_only_the_active_mode() {
+        let mut app = App::new(); // Autocrack active
+        let enter = key(KeyCode::Enter);
+        app.mode_key(enter);
+        assert_eq!(app.autocrack.last_key, Some(enter));
+        assert_eq!(app.traffic.last_key, None);
+        assert_eq!(app.lessons.last_key, None);
+        assert_eq!(app.mathviews.last_key, None);
+
+        app.select(Mode::Lessons.index());
+        let esc = key(KeyCode::Esc);
+        app.mode_key(esc);
+        assert_eq!(app.lessons.last_key, Some(esc));
+        assert_eq!(app.autocrack.last_key, Some(enter), "earlier key untouched");
+    }
+
+    #[test]
+    fn ticks_reach_only_the_active_mode() {
+        let mut app = App::new(); // Autocrack active
+        app.tick();
+        app.tick();
+        assert_eq!(app.autocrack.tick_count, 2);
+        assert_eq!(app.traffic.tick_count, 0);
+        assert_eq!(app.lessons.tick_count, 0);
+        assert_eq!(app.mathviews.tick_count, 0);
+
+        app.select(Mode::MathViews.index());
+        app.tick();
+        assert_eq!(app.mathviews.tick_count, 1);
+        assert_eq!(app.autocrack.tick_count, 2, "frozen while inactive");
     }
 }

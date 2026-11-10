@@ -1,15 +1,16 @@
-//! Rendering: tab bar, mode placeholder body, footer with keybindings.
+//! Shell chrome: tab bar and footer. Mode bodies render themselves via the
+//! per-mode dispatch in [`render_body`].
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Text};
+use ratatui::text::Line;
 use ratatui::widgets::{Block, Paragraph, Tabs};
 
 use crate::app::{ALL_MODES, App, Mode};
 
-/// Footer keybinding help, asserted by tests and shown on every screen.
-pub const FOOTER_TEXT: &str = " Tab/Shift+Tab switch | 1-4 select mode | q or Ctrl-C quits ";
+/// Global keybindings shown in the footer on every screen.
+pub const FOOTER_TEXT: &str = "Tab/Shift+Tab switch · 1-4 select mode · q or Ctrl-C quits";
 
 pub fn render(frame: &mut Frame, app: &App) {
     let [tabs_area, body_area, footer_area] = Layout::vertical([
@@ -20,7 +21,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     .areas(frame.area());
     render_tabs(frame, tabs_area, app);
     render_body(frame, body_area, app);
-    render_footer(frame, footer_area);
+    render_footer(frame, footer_area, app);
 }
 
 fn render_tabs(frame: &mut Frame, area: Rect, app: &App) {
@@ -36,23 +37,25 @@ fn render_tabs(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(tabs, area);
 }
 
+/// Dispatch the body to the active mode's renderer.
 fn render_body(frame: &mut Frame, area: Rect, app: &App) {
-    let mode: Mode = app.mode;
-    let body = Text::from(vec![
-        Line::from(mode.title()),
-        Line::from(""),
-        Line::from(mode.description()),
-        Line::from(""),
-        Line::from("[ placeholder — this mode is not implemented yet ]"),
-    ]);
-    let paragraph = Paragraph::new(body)
-        .block(Block::bordered().title(format!(" {} ", mode.title())))
-        .alignment(Alignment::Center);
-    frame.render_widget(paragraph, area);
+    match app.mode {
+        Mode::Autocrack => app.autocrack.render(frame, area),
+        Mode::TrafficSimulator => app.traffic.render(frame, area),
+        Mode::Lessons => app.lessons.render(frame, area),
+        Mode::MathViews => app.mathviews.render(frame, area),
+    }
 }
 
-fn render_footer(frame: &mut Frame, area: Rect) {
-    let footer = Paragraph::new(Line::from(FOOTER_TEXT).centered());
+fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
+    let mode_hints = match app.mode {
+        Mode::Autocrack => app.autocrack.key_hints(),
+        Mode::TrafficSimulator => app.traffic.key_hints(),
+        Mode::Lessons => app.lessons.key_hints(),
+        Mode::MathViews => app.mathviews.key_hints(),
+    };
+    let footer = Paragraph::new(Line::from(format!("{FOOTER_TEXT} | {mode_hints}")).centered())
+        .alignment(Alignment::Center);
     frame.render_widget(footer, area);
 }
 
@@ -62,8 +65,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    /// Render `app` into a test terminal and return the buffer contents as
-    /// one row-per-line string.
+    /// Render `app` into a test terminal and return the buffer.
     fn render_app(app: &App) -> ratatui::buffer::Buffer {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|frame| render(frame, app)).unwrap();
@@ -118,32 +120,7 @@ mod tests {
     }
 
     #[test]
-    fn every_mode_renders_its_name_and_placeholder() {
-        for mode in ALL_MODES {
-            let mut app = App::new();
-            app.select(mode.index());
-            let buffer = render_app(&app);
-            let text = rows(&buffer).join("\n");
-            assert!(
-                text.contains(mode.title()),
-                "{} title renders",
-                mode.title()
-            );
-            assert!(
-                text.contains(mode.description()),
-                "{} description renders",
-                mode.title()
-            );
-            assert!(
-                text.contains("[ placeholder — this mode is not implemented yet ]"),
-                "{} placeholder renders",
-                mode.title()
-            );
-        }
-    }
-
-    #[test]
-    fn footer_lists_essential_bindings_on_every_mode() {
+    fn footer_shows_global_bindings_on_every_mode() {
         for mode in ALL_MODES {
             let mut app = App::new();
             app.select(mode.index());
@@ -151,11 +128,31 @@ mod tests {
             let text = rows(&buffer).join("\n");
             assert!(
                 text.contains(FOOTER_TEXT),
-                "footer visible on {}",
+                "global footer on {}",
                 mode.title()
             );
-            assert!(text.contains("Tab"), "footer mentions tab switching");
-            assert!(text.contains("q"), "footer mentions quit key");
         }
+    }
+
+    #[test]
+    fn footer_shows_the_active_modes_hints_only() {
+        let mut app = App::new();
+        app.select(Mode::TrafficSimulator.index());
+        let text = rows(&render_app(&app)).join("\n");
+        assert!(text.contains("Up/Dn session"), "active hints shown");
+        assert!(!text.contains("victim"), "other modes' hints hidden");
+
+        app.select(Mode::MathViews.index());
+        let text = rows(&render_app(&app)).join("\n");
+        assert!(text.contains("Left/Right sample"), "active hints shown");
+        assert!(!text.contains("lesson"), "other modes' hints hidden");
+    }
+
+    #[test]
+    fn body_dispatches_to_the_active_modes_renderer() {
+        let mut app = App::new();
+        app.select(Mode::MathViews.index());
+        let text = rows(&render_app(&app)).join("\n");
+        assert!(text.contains("Math Views"), "active mode's body renders");
     }
 }

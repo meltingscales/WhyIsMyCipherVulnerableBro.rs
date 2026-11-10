@@ -1,25 +1,42 @@
 //! Crossterm event handling: maps key presses to app actions and provides
-//! the tick heartbeat the future animated demos will draw against.
+//! the tick heartbeat the animated demos draw against.
+//!
+//! Global keys (mode switching, quit) are claimed before any mode sees them;
+//! every other key press routes to the active mode's handler.
 
 use std::io;
 use std::time::Duration;
 
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-/// What the main loop should do in response to an input event.
+/// A resolved global action for the main loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     NextTab,
     PrevTab,
     Select(usize),
     Quit,
-    /// Poll timed out with no input; the loop's animation heartbeat.
+}
+
+/// One event for the main loop: a resolved global action, a key press for the
+/// active mode to interpret, or the animation heartbeat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppEvent {
+    Global(Action),
+    ModeKey(KeyEvent),
     Tick,
 }
 
-/// Map a key event to an action. Releases, repeats, and unmapped keys return
-/// `None`; char actions require bare modifiers so combos like Ctrl-Q stay
-/// inert while Shift+Tab (reported as `BackTab`) still cycles.
+/// Where a key press belongs: the global shell or the active mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyClass {
+    Global,
+    Mode,
+}
+
+/// Map a key event to a global action. Releases, repeats, and unmapped keys
+/// return `None`; char actions require bare modifiers so combos like Ctrl-Q
+/// stay inert while Shift+Tab (reported as `BackTab`) still cycles.
 pub fn key_to_action(key: KeyEvent) -> Option<Action> {
     if key.kind != KeyEventKind::Press {
         return None;
@@ -36,17 +53,36 @@ pub fn key_to_action(key: KeyEvent) -> Option<Action> {
     }
 }
 
-/// Wait up to `timeout` for the next input event. Key events map through
-/// [`key_to_action`]; non-key events are ignored; a timeout yields
-/// [`Action::Tick`].
-pub fn next_action(timeout: Duration) -> io::Result<Option<Action>> {
+/// Classify a key press: global keys never reach a mode, mode keys only reach
+/// the active one. Non-press events are ignored entirely.
+pub fn classify(key: KeyEvent) -> Option<KeyClass> {
+    if key.kind != KeyEventKind::Press {
+        return None;
+    }
+    if key_to_action(key).is_some() {
+        Some(KeyClass::Global)
+    } else {
+        Some(KeyClass::Mode)
+    }
+}
+
+/// Wait up to `timeout` for the next input event: global keys resolve to
+/// their action, other key presses pass through for the active mode,
+/// non-key events are ignored, and a timeout yields [`AppEvent::Tick`].
+pub fn next_app_event(timeout: Duration) -> io::Result<Option<AppEvent>> {
     if event::poll(timeout)? {
         match event::read()? {
-            Event::Key(key) => Ok(key_to_action(key)),
+            Event::Key(key) => match classify(key) {
+                Some(KeyClass::Global) => Ok(Some(AppEvent::Global(
+                    key_to_action(key).expect("classified keys map to actions"),
+                ))),
+                Some(KeyClass::Mode) => Ok(Some(AppEvent::ModeKey(key))),
+                None => Ok(None),
+            },
             _ => Ok(None),
         }
     } else {
-        Ok(Some(Action::Tick))
+        Ok(Some(AppEvent::Tick))
     }
 }
 
@@ -122,5 +158,40 @@ mod tests {
             KeyEventKind::Release,
         );
         assert_eq!(key_to_action(release), None);
+    }
+
+    #[test]
+    fn global_keys_classify_global_and_never_reach_a_mode() {
+        for key in [
+            press(KeyCode::Tab, KeyModifiers::NONE),
+            press(KeyCode::BackTab, KeyModifiers::SHIFT),
+            press(KeyCode::Char('3'), KeyModifiers::NONE),
+            press(KeyCode::Char('q'), KeyModifiers::NONE),
+            press(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        ] {
+            assert_eq!(classify(key), Some(KeyClass::Global), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn mode_keys_classify_mode() {
+        for key in [
+            press(KeyCode::Enter, KeyModifiers::NONE),
+            press(KeyCode::Up, KeyModifiers::NONE),
+            press(KeyCode::Down, KeyModifiers::NONE),
+            press(KeyCode::Left, KeyModifiers::NONE),
+            press(KeyCode::Right, KeyModifiers::NONE),
+            press(KeyCode::Esc, KeyModifiers::NONE),
+            press(KeyCode::Char('r'), KeyModifiers::NONE),
+        ] {
+            assert_eq!(classify(key), Some(KeyClass::Mode), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn releases_do_not_classify() {
+        let release =
+            KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Release);
+        assert_eq!(classify(release), None);
     }
 }

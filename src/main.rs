@@ -1,13 +1,15 @@
 //! Thin entry point: owns terminal lifecycle and the app loop.
 
 mod app;
+mod cipher;
 mod event;
+mod modes;
 mod ui;
 
 use std::time::Duration;
 
 use crate::app::App;
-use crate::event::{Action, next_action};
+use crate::event::{Action, AppEvent, next_app_event};
 
 /// Animation heartbeat; the loop redraws at most this often between inputs.
 const TICK: Duration = Duration::from_millis(250);
@@ -25,12 +27,14 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<()> {
     let mut app = App::new();
     loop {
         terminal.draw(|frame| ui::render(frame, &app))?;
-        match next_action(TICK)? {
-            Some(Action::NextTab) => app.next(),
-            Some(Action::PrevTab) => app.prev(),
-            Some(Action::Select(index)) => app.select(index),
-            Some(Action::Quit) => app.quit(),
-            Some(Action::Tick) | None => {}
+        match next_app_event(TICK)? {
+            Some(AppEvent::Global(Action::NextTab)) => app.next(),
+            Some(AppEvent::Global(Action::PrevTab)) => app.prev(),
+            Some(AppEvent::Global(Action::Select(index))) => app.select(index),
+            Some(AppEvent::Global(Action::Quit)) => app.quit(),
+            Some(AppEvent::ModeKey(key)) => app.mode_key(key),
+            Some(AppEvent::Tick) => app.tick(),
+            None => {}
         }
         if app.should_quit {
             return Ok(());
