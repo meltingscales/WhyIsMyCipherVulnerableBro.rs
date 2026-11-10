@@ -30,7 +30,7 @@ More to come — see the [roadmap](#status).
 
 Pre-alpha — currently a skeleton. Roadmap:
 
-- [ ] Core TUI framework + navigation
+- [x] Core TUI framework + navigation
 - [ ] SWEET32 demo
 - [ ] FREAK demo
 - [ ] Logjam demo
@@ -41,10 +41,10 @@ Pre-alpha — currently a skeleton. Roadmap:
 
 ## Getting started
 
-Requires Rust (2024 edition).
+Requires Rust (2024 edition); [just](https://github.com/casey/just) is optional.
 
 ```sh
-cargo run
+cargo run    # or: just run
 ```
 
 ## Development
