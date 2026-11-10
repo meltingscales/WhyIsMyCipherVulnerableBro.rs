@@ -1,0 +1,47 @@
+# autocrack Specification
+
+## Purpose
+
+The attack-runner mode: pick a victim cipher, watch the cryptanalytic attack execute live step by step, and see the recovered key and plaintext — the mode every future attack demo (SWEET32, FREAK, Logjam) will plug into.
+
+## Requirements
+
+### Requirement: Victim cipher selection
+The Autocrack screen SHALL list the available victim ciphers (at minimum Caesar and Vigenère) with their sample ciphertexts, and SHALL let the user select one via arrow keys or number keys and start the attack with Enter.
+
+#### Scenario: Entering the mode shows the victim list
+- **WHEN** the user switches to Autocrack with no attack running
+- **THEN** the screen lists every available victim cipher with a short sample of its ciphertext, one selectable per line
+
+#### Scenario: Enter starts the selected attack
+- **WHEN** the user presses Enter on a selected victim cipher
+- **THEN** the attack for that cipher begins running on its built-in sample
+
+### Requirement: Attack advances live per tick
+While an attack is running, it SHALL advance one step per tick, displaying each candidate key with its fitness score as it is tried, and SHALL highlight the best-scoring candidate seen so far.
+
+#### Scenario: Candidates and scores stream in
+- **WHEN** an attack is running
+- **THEN** newly tried candidates appear with their scores, and the best candidate so far is visually distinguished
+
+#### Scenario: The attack terminates on its own
+- **WHEN** an attack has tried its final candidate
+- **THEN** the attack stops advancing and the screen reports completion
+
+### Requirement: Completion shows key and plaintext
+On completion, the screen SHALL display the recovered key and the decrypted plaintext produced by that key.
+
+#### Scenario: Done state
+- **WHEN** an attack completes
+- **THEN** the best key and the plaintext decrypted under it are both visible
+
+### Requirement: Reset and mode-switch safety
+The Autocrack screen SHALL reset to the victim list on `r`, and switching modes mid-attack SHALL preserve attack progress until the user returns or resets.
+
+#### Scenario: r returns to the victim list
+- **WHEN** `r` is pressed in any autocrack state
+- **THEN** the screen returns to victim selection with no attack running
+
+#### Scenario: Progress survives a mode switch
+- **WHEN** the user switches to another mode while an attack is running and later returns
+- **THEN** the attack state is exactly as it was left

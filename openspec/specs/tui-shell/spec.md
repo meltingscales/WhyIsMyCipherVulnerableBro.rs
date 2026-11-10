@@ -53,10 +53,3 @@ The application SHALL display a persistent footer listing the global keybindings
 #### Scenario: Footer lists the essential bindings
 - **WHEN** the application is running
 - **THEN** the footer shows the mode-switch and quit keybindings
-
-### Requirement: Placeholder mode screens
-Each mode SHALL render an identifiable placeholder screen showing the mode's name and its planned purpose, so navigation is verifiable before any mode is implemented.
-
-#### Scenario: Placeholder identifies the mode
-- **WHEN** the user navigates to any mode
-- **THEN** the screen body shows that mode's name and a not-yet-implemented placeholder description
