@@ -1,8 +1,10 @@
 //! Thin entry point: owns terminal lifecycle and the app loop.
+//! `--mcp` swaps the terminal for the headless harness server.
 
 mod app;
 mod cipher;
 mod event;
+mod mcp;
 mod modes;
 mod ui;
 
@@ -15,6 +17,25 @@ use crate::event::{Action, AppEvent, next_app_event};
 const TICK: Duration = Duration::from_millis(250);
 
 fn main() -> std::io::Result<()> {
+    let mut args = std::env::args().skip(1);
+    match (args.next().as_deref(), args.next()) {
+        (Some("--mcp"), None) => mcp::server::serve(),
+        (Some("--mcp"), Some(extra)) => {
+            eprintln!("unexpected argument after --mcp: {extra}");
+            std::process::exit(2);
+        }
+        (Some(other), _) => {
+            eprintln!(
+                "unknown argument: {other}\nusage: {} [--mcp]",
+                std::env::args().next().unwrap_or_default()
+            );
+            std::process::exit(2);
+        }
+        (None, _) => run_tui(),
+    }
+}
+
+fn run_tui() -> std::io::Result<()> {
     // init() enters the alternate screen, enables raw mode, and installs a
     // panic hook that restores the terminal before the panic message prints.
     let mut terminal = ratatui::init();
