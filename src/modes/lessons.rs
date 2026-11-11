@@ -16,7 +16,7 @@ pub struct Lesson {
 }
 
 /// The shipped starter lessons, matching the attacks the app can run.
-pub const LESSONS: [Lesson; 2] = [
+pub const LESSONS: [Lesson; 3] = [
     Lesson {
         title: "Why Caesar dies — frequency analysis",
         steps: &[
@@ -65,6 +65,46 @@ pub const LESSONS: [Lesson; 2] = [
             "The lesson underneath: reuse is the enemy. A one-time pad is \
              unbreakable; repeat the pad and every repetition leaks \
              structure an attacker can line up and solve.",
+        ],
+    },
+    Lesson {
+        title: "SWEET32 — the birthday problem kills 3DES",
+        steps: &[
+            "How many people must share a room before two probably have the \
+             same birthday? Not 365 — just 23. Collisions arrive after about \
+             the square root of the number of possibilities, because what \
+             matters is the number of PAIRS, and k people make k·(k-1)/2 pairs.",
+            "Ciphers collide the same way. A block cipher with an n-bit block \
+             has 2^n possible block values, so after roughly 2^(n/2) blocks \
+             two ciphertext blocks probably match. For 3DES, n is 64: the \
+             birthday bound is 2^32 blocks — about 32 GB of TLS traffic, an \
+             afternoon of browsing.",
+            "In 2016 SWEET32 showed that when two blocks collide in CBC \
+             mode, XORing the two plaintexts cancels the key stream: \
+             P_i XOR P_j = C_(i-1) XOR C_(j-1), which the attacker can see. \
+             If one plaintext is known, the other falls out. Browsers and \
+             servers dropped 3DES that year — not because 3DES's algorithm \
+             broke, but because its BLOCK was too small.",
+            "This app's demo encrypts with AES-128 — a cipher nobody has \
+             broken — and truncates each block to 20 bits, a space of \
+             2^20 = 1,048,576 values. That truncation is the entire attack \
+             surface. It proves the point precisely: block size, not \
+             algorithm strength, is what the birthday problem attacks.",
+            "The bound says the first collision should arrive near \
+             sqrt(pi/2 · 2^20) ≈ 1281 blocks. Collision time is a random \
+             draw around that center — with this app's fixed demo traffic, \
+             the first exploitable collision lands at 4744 blocks, a \
+             perfectly ordinary tail draw on the birthday curve.",
+            "The leak needs known plaintext on one side: every third record \
+             in the demo is the attacker's own session, with a known \
+             (zero) cookie. When a victim record collides with one of those, \
+             XOR cancels the shared header and the known parts, and the \
+             victim's cookie is left standing in the open.",
+            "Open the Autocrack tab, pick SWEET32, press Enter, and watch \
+             the counters: blocks climb, expected collisions grow as k², \
+             and then the collision row lands and the cookie leaks. The \
+             lesson underneath: never let a small block space carry \
+             long-lived secrets — the math is patient.",
         ],
     },
 ];
@@ -212,7 +252,29 @@ mod tests {
         let text = rows_rendered(&state).join("\n");
         assert!(text.contains("Why Caesar dies — frequency analysis"));
         assert!(text.contains("Breaking repeating-XOR"));
+        assert!(text.contains("SWEET32 — the birthday problem kills 3DES"));
         assert!(text.contains("steps)"), "step counts shown");
+    }
+
+    #[test]
+    fn sweet32_lesson_opens_and_cites_the_simulators_numbers() {
+        let mut state = State::new();
+        state.handle_key(press(KeyCode::Down));
+        state.handle_key(press(KeyCode::Down));
+        state.handle_key(press(KeyCode::Enter));
+        assert_eq!(state.open, Some((2, 0)));
+
+        // Walk every step; the prose cites the pinned simulator numbers.
+        let last = LESSONS[2].steps.len() - 1;
+        let mut full_text = rows_rendered(&state).join("\n");
+        for _ in 0..last {
+            state.handle_key(press(KeyCode::Right));
+            full_text.push('\n');
+            full_text.push_str(&rows_rendered(&state).join("\n"));
+        }
+        assert!(full_text.contains("4744"), "cites the demo's pinned draw");
+        assert!(full_text.contains("1281"), "cites the birthday bound");
+        assert!(full_text.contains("32 GB"), "cites the real SWEET32 scale");
     }
 
     #[test]

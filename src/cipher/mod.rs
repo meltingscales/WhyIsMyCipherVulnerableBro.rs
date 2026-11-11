@@ -3,5 +3,6 @@
 
 pub mod caesar;
 pub mod freq;
+pub mod sweet32;
 pub mod vigenere;
 pub mod xor;

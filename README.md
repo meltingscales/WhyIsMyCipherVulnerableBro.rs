@@ -31,7 +31,7 @@ More to come — see the [roadmap](#status).
 Pre-alpha — currently a skeleton. Roadmap:
 
 - [x] Core TUI framework + navigation
-- [ ] SWEET32 demo
+- [x] SWEET32 demo
 - [ ] FREAK demo
 - [ ] Logjam demo
 - [ ] Traffic simulator mode

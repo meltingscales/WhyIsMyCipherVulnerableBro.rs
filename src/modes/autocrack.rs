@@ -3,8 +3,9 @@
 //! Caesar streams all 26 shift candidates, scored by chi-squared against
 //! English. Vigenère first streams the index-of-coincidence key-length scan,
 //! then solves each key column by per-column chi-squared, assembling the key
-//! column by column. One row lands per tick; `advance` is pure, so the runner
-//! is fully testable without a terminal.
+//! column by column. SWEET32 streams birthday-attack traffic stats until an
+//! own/victim block collision leaks the cookie. One row lands per tick;
+//! `advance` is pure, so the runner is fully testable without a terminal.
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
@@ -15,6 +16,9 @@ use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
 
 use crate::cipher::caesar;
 use crate::cipher::freq::{ENGLISH_SAMPLE, chi_squared};
+use crate::cipher::sweet32::{
+    DEMO_BLOCK_BITS, Simulator, TICK_STRIDE, expected_collisions, first_collision_expectation,
+};
 use crate::cipher::vigenere;
 
 /// The victim ciphers on offer, in list order.
@@ -22,15 +26,17 @@ use crate::cipher::vigenere;
 pub enum Victim {
     Caesar,
     Vigenere,
+    Sweet32,
 }
 
-pub const VICTIMS: [Victim; 2] = [Victim::Caesar, Victim::Vigenere];
+pub const VICTIMS: [Victim; 3] = [Victim::Caesar, Victim::Vigenere, Victim::Sweet32];
 
 impl Victim {
     pub fn name(self) -> &'static str {
         match self {
             Victim::Caesar => "Caesar (shift 11)",
             Victim::Vigenere => "Vigenère (key \"lemon\")",
+            Victim::Sweet32 => "SWEET32 (birthday attack)",
         }
     }
 
@@ -39,15 +45,23 @@ impl Victim {
         match self {
             Victim::Caesar => "monoalphabetic — dies to frequency analysis",
             Victim::Vigenere => "polyalphabetic — dies to IoC + per-column analysis",
+            Victim::Sweet32 => "small block space — dies to the birthday problem",
         }
     }
 
     /// The sample ciphertext this victim carries, derived from the shared
-    /// English sample so every mode tells the same story.
+    /// English sample so every mode tells the same story. SWEET32's
+    /// "ciphertext" is the first few truncated block values of its traffic.
     pub fn ciphertext(self) -> String {
         match self {
             Victim::Caesar => caesar::encrypt(ENGLISH_SAMPLE, 11),
             Victim::Vigenere => vigenere::encrypt(ENGLISH_SAMPLE, "lemon"),
+            Victim::Sweet32 => Simulator::demo()
+                .preview_blocks(4)
+                .iter()
+                .map(|v| format!("{v:05x}"))
+                .collect::<Vec<_>>()
+                .join(" "),
         }
     }
 }
@@ -58,7 +72,7 @@ pub enum Phase {
     /// Choosing a victim; the index selects into [`VICTIMS`].
     Select { selection: usize },
     /// An attack is running or finished (`run.done` distinguishes them).
-    Running(Run),
+    Running(Box<Run>),
 }
 
 /// One visible step of an attack: what was tried, how English it looked.
@@ -70,7 +84,8 @@ pub struct Row {
 }
 
 /// A live attack. `advance` pushes the next row; when the plan is exhausted
-/// the run is `done` and carries the recovered key and plaintext.
+/// the run is `done` and carries the recovered key and plaintext (for
+/// classical victims) or the collision result and leak (for SWEET32).
 #[derive(Debug, PartialEq)]
 pub struct Run {
     pub victim: Victim,
@@ -82,6 +97,8 @@ pub struct Run {
     step: usize,
     /// Vigenère only: the precomputed key-length scan, streamed one row per tick.
     scan: Vec<vigenere::KeyLengthScore>,
+    /// SWEET32 only: the birthday simulator, stepped `TICK_STRIDE` per tick.
+    birthday: Option<Simulator>,
     pub done: bool,
     pub recovered_key: String,
     pub recovered_plaintext: String,
@@ -95,7 +112,11 @@ impl Run {
         let ciphertext = victim.ciphertext();
         let scan = match victim {
             Victim::Vigenere => vigenere::key_length_scan(&ciphertext, 1, VIGENERE_MAX_LEN),
-            Victim::Caesar => Vec::new(),
+            Victim::Caesar | Victim::Sweet32 => Vec::new(),
+        };
+        let birthday = match victim {
+            Victim::Sweet32 => Some(Simulator::demo()),
+            Victim::Caesar | Victim::Vigenere => None,
         };
         Self {
             victim,
@@ -104,18 +125,27 @@ impl Run {
             best_row: None,
             step: 0,
             scan,
+            birthday,
             done: false,
             recovered_key: String::new(),
             recovered_plaintext: String::new(),
         }
     }
 
-    /// Total steps this run will take (rows it will stream).
+    /// Total steps this run will take (rows it will stream). The birthday
+    /// attack's collision time is a random draw; report the expectation as
+    /// an estimate only.
     pub fn total_steps(&self) -> usize {
         match self.victim {
             Victim::Caesar => 26,
             // 12 scan rows, then one solve row per key column of the chosen length.
             Victim::Vigenere => VIGENERE_MAX_LEN + VIGENERE_MAX_LEN,
+            // Expectation scaled by ~2.3: only own/victim pairs exploit, and
+            // roughly 4/9 of pairs qualify.
+            Victim::Sweet32 => ((first_collision_expectation(DEMO_BLOCK_BITS) * 2.3
+                / TICK_STRIDE as f64)
+                .ceil() as usize)
+                .max(1),
         }
     }
 
@@ -128,18 +158,23 @@ impl Run {
         match self.victim {
             Victim::Caesar => self.advance_caesar(),
             Victim::Vigenere => self.advance_vigenere(),
+            Victim::Sweet32 => self.advance_birthday(),
         }
         self.step += 1;
-        self.best_row = self
-            .rows
-            .iter()
-            .enumerate()
-            .min_by(|(_, a), (_, b)| {
-                a.score
-                    .partial_cmp(&b.score)
-                    .expect("row scores are finite")
-            })
-            .map(|(i, _)| i);
+        if self.victim != Victim::Sweet32 {
+            // "Best candidate" highlight is a cryptanalysis concept; birthday
+            // stats rows have no ordering to highlight.
+            self.best_row = self
+                .rows
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| {
+                    a.score
+                        .partial_cmp(&b.score)
+                        .expect("row scores are finite")
+                })
+                .map(|(i, _)| i);
+        }
     }
 
     fn push_row(&mut self, label: String, score: f64, note: String) {
@@ -201,6 +236,41 @@ impl Run {
         );
     }
 
+    fn advance_birthday(&mut self) {
+        // Extract the tick's outcome before touching self's rows: the
+        // simulator borrow and row pushes can't coexist.
+        let (sent, collisions, exploit) = {
+            let sim = self
+                .birthday
+                .as_mut()
+                .expect("SWEET32 runs carry a simulator");
+            sim.step(TICK_STRIDE);
+            (sim.records_sent, sim.collisions, sim.exploit)
+        };
+        let expected = expected_collisions(sent, DEMO_BLOCK_BITS);
+        self.push_row(
+            format!("{sent:6} blocks"),
+            expected,
+            format!("collisions {collisions} | expected {expected:.2}"),
+        );
+        if let Some(c) = exploit {
+            let cookie_hex: String = c.leaked_cookie.iter().map(|b| format!("{b:02x}")).collect();
+            self.push_row(
+                format!("COLLISION {:05x}", c.block_value),
+                expected,
+                format!("record #{} vs own #{}", c.victim_index, c.own_index),
+            );
+            self.recovered_key = format!(
+                "birthday collision after {} blocks (expected ≈{})",
+                c.blocks_sent,
+                first_collision_expectation(DEMO_BLOCK_BITS).round() as u64
+            );
+            self.recovered_plaintext =
+                format!("leaked cookie: {cookie_hex} (XOR of the colliding records)");
+            self.done = true;
+        }
+    }
+
     /// The scan's pick: smallest length entering the English IoC band, the
     /// same heuristic the cipher core's tests pin down.
     fn chosen_key_length(&self) -> usize {
@@ -258,7 +328,7 @@ impl State {
             }
             (KeyCode::Enter, Phase::Select { selection }) => {
                 let victim = VICTIMS[*selection];
-                self.phase = Phase::Running(Run::new(victim));
+                self.phase = Phase::Running(Box::new(Run::new(victim)));
             }
             _ => {}
         }
@@ -331,21 +401,40 @@ impl State {
         let list = List::new(items).block(Block::bordered().title(title));
         frame.render_widget(list, list_area);
 
-        let status = if run.done {
-            vec![
+        let status = match (run.victim, run.done) {
+            (Victim::Sweet32, true) => vec![
+                Line::from(format!("Victim:   {}", run.victim.name())),
+                Line::from(format!("Result:   {}", run.recovered_key)),
+                Line::from(format!("Leak:     {}", {
+                    run.recovered_plaintext.chars().take(48).collect::<String>()
+                })),
+                Line::from("r — back to victim list"),
+            ],
+            (_, true) => vec![
                 Line::from(format!("Victim:   {}", run.victim.name())),
                 Line::from(format!("Key:      {}", run.recovered_key)),
                 Line::from(format!("Plaintext: {}", {
                     run.recovered_plaintext.chars().take(48).collect::<String>()
                 })),
                 Line::from("r — back to victim list"),
-            ]
-        } else {
-            vec![
+            ],
+            (Victim::Sweet32, false) => vec![
+                Line::from(format!("Victim:   {}", run.victim.name())),
+                Line::from(format!(
+                    "Blocks sent {} (expected ≈{} total)",
+                    run.birthday
+                        .as_ref()
+                        .expect("simulator present")
+                        .records_sent,
+                    run.total_steps() * TICK_STRIDE
+                )),
+                Line::from("waiting for an own/victim block collision…"),
+            ],
+            (_, false) => vec![
                 Line::from(format!("Victim:   {}", run.victim.name())),
                 Line::from(format!("Step {}/{}", run.rows.len(), run.total_steps())),
                 Line::from("▶ marks the best candidate so far (lowest chi-squared)"),
-            ]
+            ],
         };
         let paragraph = Paragraph::new(Text::from(status)).alignment(Alignment::Left);
         frame.render_widget(paragraph, status_area);
@@ -383,8 +472,10 @@ mod tests {
         assert_eq!(state.phase, Phase::Select { selection: 0 });
         state.handle_key(press(KeyCode::Down));
         assert_eq!(state.phase, Phase::Select { selection: 1 });
+        state.handle_key(press(KeyCode::Down));
+        assert_eq!(state.phase, Phase::Select { selection: 2 });
         state.handle_key(press(KeyCode::Down)); // clamps at bottom
-        assert_eq!(state.phase, Phase::Select { selection: 1 });
+        assert_eq!(state.phase, Phase::Select { selection: 2 });
     }
 
     #[test]
@@ -432,6 +523,73 @@ mod tests {
         );
         assert_eq!(run.recovered_key, "lemon");
         assert_eq!(run.recovered_plaintext, ENGLISH_SAMPLE);
+    }
+
+    #[test]
+    fn sweet32_run_streams_stats_then_collides() {
+        let mut run = Run::new(Victim::Sweet32);
+        assert!(run.total_steps() >= 1);
+        let mut ticks = 0;
+        while !run.done && ticks < 60 {
+            run.advance();
+            ticks += 1;
+        }
+        assert!(run.done, "collision lands within 60 ticks (≈12k blocks)");
+        // Every stats row carries the three counters the spec requires; the
+        // final event row is the collision itself.
+        let stats = &run.rows[..run.rows.len() - 1];
+        assert!(
+            stats
+                .iter()
+                .all(|row| row.note.contains("collisions") && row.note.contains("expected"))
+        );
+        assert!(run.recovered_key.contains("birthday collision after"));
+        assert!(run.recovered_key.contains("expected ≈"));
+        assert!(run.recovered_plaintext.contains("leaked cookie: "));
+        // No best-candidate highlight on a birthday run.
+        assert_eq!(run.best_row, None);
+        // The last row is the collision event.
+        assert!(run.rows.last().unwrap().label.contains("COLLISION"));
+    }
+
+    #[test]
+    fn sweet32_selection_reaches_the_third_victim() {
+        let mut state = State::new();
+        state.handle_key(press(KeyCode::Down));
+        state.handle_key(press(KeyCode::Down));
+        state.handle_key(press(KeyCode::Enter));
+        match &state.phase {
+            Phase::Running(run) => assert_eq!(run.victim, Victim::Sweet32),
+            other => panic!("expected running, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sweet32_screens_render_counters_and_done_result() {
+        let mut state = State::new();
+        let text = rows_rendered(&state).join("\n");
+        assert!(text.contains("SWEET32 (birthday attack)"), "victim listed");
+
+        state.handle_key(press(KeyCode::Down));
+        state.handle_key(press(KeyCode::Down));
+        state.handle_key(press(KeyCode::Enter));
+        state.tick();
+        let text = rows_rendered(&state).join("\n");
+        assert!(text.contains("Blocks sent"), "block counter while running");
+        assert!(text.contains("collisions"), "stats rows stream");
+
+        for _ in 0..60 {
+            if let Phase::Running(run) = &state.phase
+                && run.done
+            {
+                break;
+            }
+            state.tick();
+        }
+        let text = rows_rendered(&state).join("\n");
+        assert!(text.contains("Result:   birthday collision after"));
+        assert!(text.contains("Leak:     leaked cookie: "));
+        assert!(text.contains("COLLISION"));
     }
 
     #[test]

@@ -124,6 +124,26 @@ fn harness_drives_full_scenarios_end_to_end() {
         snapshot.contains("Pick a victim"),
         "reset returned to autocrack start"
     );
+
+    // SWEET32 scenario: third victim, tick to the collision, snapshot shows
+    // the birthday bound and the leaked cookie.
+    h.call(15, "send_key", json!({ "key": "down" }));
+    h.call(16, "send_key", json!({ "key": "down" }));
+    h.call(17, "send_key", json!({ "key": "enter" }));
+    h.call(18, "tick", json!({ "n": 60 }));
+    let snapshot = h.snapshot_text(19);
+    assert!(
+        snapshot.contains("Attack — done"),
+        "birthday attack completed"
+    );
+    assert!(
+        snapshot.contains("Result:   birthday collision after"),
+        "collision reported"
+    );
+    assert!(
+        snapshot.contains("Leak:     leaked cookie: "),
+        "cookie leaked"
+    );
 }
 
 #[test]

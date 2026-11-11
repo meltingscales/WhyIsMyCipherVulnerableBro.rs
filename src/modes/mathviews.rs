@@ -6,8 +6,10 @@ use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
-use ratatui::text::Line;
-use ratatui::widgets::{Bar, BarChart, Block, Paragraph};
+use ratatui::text::{Line, Text};
+use ratatui::widgets::{Bar, BarChart, BarGroup, Block, Paragraph};
+
+use crate::cipher::sweet32::{DEMO_BLOCK_BITS as BIRTHDAY_BITS, Simulator, expected_collisions};
 
 use crate::cipher::caesar;
 use crate::cipher::freq::{ENGLISH_SAMPLE, chi_squared, index_of_coincidence, letter_counts};
@@ -37,11 +39,20 @@ fn samples() -> Vec<Sample> {
     ]
 }
 
+/// Which chart the screen shows; `v` toggles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    Frequency,
+    Birthday,
+}
+
 /// Math Views screen state.
 #[derive(Debug)]
 pub struct State {
     /// Index into the sample set; arrows cycle with wrap-around.
     pub sample: usize,
+    /// The active chart.
+    pub view: View,
     /// Test seam: the last key routed here (only the active mode receives keys).
     pub(crate) last_key: Option<KeyEvent>,
     /// Test seam: ticks received while this mode is active.
@@ -52,6 +63,7 @@ impl State {
     pub fn new() -> Self {
         Self {
             sample: 0,
+            view: View::Frequency,
             last_key: None,
             tick_count: 0,
         }
@@ -78,6 +90,12 @@ impl State {
             KeyCode::Right => {
                 self.sample = (self.sample + 1) % samples().len();
             }
+            KeyCode::Char('v') => {
+                self.view = match self.view {
+                    View::Frequency => View::Birthday,
+                    View::Birthday => View::Frequency,
+                };
+            }
             _ => {}
         }
     }
@@ -87,10 +105,17 @@ impl State {
     }
 
     pub fn key_hints(&self) -> &'static str {
-        "Left/Right sample"
+        "Left/Right sample · v view"
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect) {
+        match self.view {
+            View::Frequency => self.render_frequency(frame, area),
+            View::Birthday => Self::render_birthday(frame, area),
+        }
+    }
+
+    fn render_frequency(&self, frame: &mut Frame, area: Rect) {
         let samples = samples();
         let sample = &samples[self.sample % samples.len()];
         let [chart_area, stats_area] =
@@ -120,6 +145,61 @@ impl State {
         let stats = Paragraph::new(Line::from(format!(
             "chi-squared vs English: {chi:.4}   ·   index of coincidence: {ioc:.4}   (English ≈ 0.066, flat ≈ 0.038)"
         )))
+        .block(Block::bordered());
+        frame.render_widget(stats, stats_area);
+    }
+
+    /// Observed vs expected collisions at 1k-block checkpoints of the demo
+    /// space, computed once and shared by every render.
+    fn birthday_checkpoints() -> &'static [(usize, usize, f64)] {
+        static CHECKPOINTS: std::sync::OnceLock<Vec<(usize, usize, f64)>> =
+            std::sync::OnceLock::new();
+        CHECKPOINTS.get_or_init(|| {
+            let mut sim = Simulator::demo();
+            (1..=8)
+                .map(|k| {
+                    let blocks = k * 1024;
+                    sim.step_past_exploit(blocks - sim.records_sent);
+                    let expected = expected_collisions(blocks, BIRTHDAY_BITS);
+                    (blocks, sim.collisions, expected)
+                })
+                .collect()
+        })
+    }
+
+    fn render_birthday(frame: &mut Frame, area: Rect) {
+        let [chart_area, stats_area] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(4)]).areas(area);
+
+        let observed: Vec<Bar> = Self::birthday_checkpoints()
+            .iter()
+            .map(|&(blocks, collisions, _)| {
+                Bar::default()
+                    .label(format!("{}k", blocks / 1024))
+                    .value(collisions as u64)
+                    .style(Style::default().fg(ratatui::style::Color::Cyan))
+            })
+            .collect();
+        let expected: Vec<Bar> = Self::birthday_checkpoints()
+            .iter()
+            .map(|&(blocks, _, expected)| {
+                Bar::default()
+                    .label(format!("{}k", blocks / 1024))
+                    .value(expected.ceil() as u64)
+                    .style(Style::default().fg(ratatui::style::Color::Magenta))
+            })
+            .collect();
+        let chart = BarChart::new(observed)
+            .data(BarGroup::new(expected))
+            .block(Block::bordered().title(" Birthday collisions — 2^20 block space "))
+            .bar_width(3)
+            .bar_gap(1);
+        frame.render_widget(chart, chart_area);
+
+        let stats = Paragraph::new(Text::from(vec![
+            Line::from("observed (cyan) vs expected k²/2^21 (magenta)"),
+            Line::from("checkpoints every 1k blocks, 2^20 space"),
+        ]))
         .block(Block::bordered());
         frame.render_widget(stats, stats_area);
     }
@@ -191,6 +271,39 @@ mod tests {
         assert!(
             text.contains("index of coincidence:"),
             "IoC readout renders"
+        );
+    }
+
+    #[test]
+    fn v_toggles_between_frequency_and_birthday_views() {
+        let mut state = State::new();
+        assert_eq!(state.view, View::Frequency);
+        state.handle_key(press(KeyCode::Char('v')));
+        assert_eq!(state.view, View::Birthday);
+        // Arrows keep cycling samples in either view (harmless in birthday).
+        state.handle_key(press(KeyCode::Right));
+        assert_eq!(state.sample, 1);
+        state.handle_key(press(KeyCode::Char('v')));
+        assert_eq!(state.view, View::Frequency);
+    }
+
+    #[test]
+    fn birthday_view_renders_both_labeled_series() {
+        let mut state = State::new();
+        state.handle_key(press(KeyCode::Char('v')));
+        let text = rows_rendered(&state).join("\n");
+        assert!(
+            text.contains("Birthday collisions — 2^20 block space"),
+            "view named"
+        );
+        assert!(text.contains("observed (cyan)"), "observed labeled");
+        assert!(
+            text.contains("expected k²/2^21 (magenta)"),
+            "expected labeled"
+        );
+        assert!(
+            text.contains("checkpoints every 1k blocks"),
+            "checkpoints named"
         );
     }
 
