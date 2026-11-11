@@ -7,7 +7,7 @@ The attack-runner mode: pick a victim cipher, watch the cryptanalytic attack exe
 ## Requirements
 
 ### Requirement: Victim cipher selection
-The Autocrack screen SHALL list the available victim ciphers (at minimum Caesar and Vigenère) with their sample ciphertexts, and SHALL let the user select one via arrow keys or number keys and start the attack with Enter.
+The Autocrack screen SHALL list the available victim ciphers (at minimum Caesar, Vigenère, and SWEET32) with their sample ciphertexts or traffic descriptions, and SHALL let the user select one via arrow keys and start the attack with Enter (bare `1`-`4` remain the shell's mode keys).
 
 #### Scenario: Entering the mode shows the victim list
 - **WHEN** the user switches to Autocrack with no attack running
@@ -28,8 +28,8 @@ While an attack is running, it SHALL advance one step per tick, displaying each 
 - **WHEN** an attack has tried its final candidate
 - **THEN** the attack stops advancing and the screen reports completion
 
-### Requirement: Completion shows key and plaintext
-On completion, the screen SHALL display the recovered key and the decrypted plaintext produced by that key.
+### Requirement: Completion shows the attack's recovered result
+On completion, the screen SHALL display the attack's recovered result: the key and decrypted plaintext for cipher breaks, or the colliding blocks and the plaintext material recovered from them for birthday attacks.
 
 #### Scenario: Done state
 - **WHEN** an attack completes
@@ -45,3 +45,14 @@ The Autocrack screen SHALL reset to the victim list on `r`, and switching modes 
 #### Scenario: Progress survives a mode switch
 - **WHEN** the user switches to another mode while an attack is running and later returns
 - **THEN** the attack state is exactly as it was left
+
+### Requirement: SWEET32 birthday attack runs to a collision
+The SWEET32 victim SHALL run a birthday-collision attack over the cipher core's simulated block traffic: while running, it SHALL display blocks sent, collisions found, and the expected collision count from the birthday math, and it SHALL terminate on its own at the first collision, reporting the collision's block count against the theoretical birthday bound and the cookie material recovered by XORing the colliding records.
+
+#### Scenario: Progress streams against the birthday expectation
+- **WHEN** the SWEET32 attack is running
+- **THEN** the screen shows blocks sent so far, collisions found so far, and the expected count growing with the birthday curve
+
+#### Scenario: First collision ends the attack with the leak
+- **WHEN** a collision occurs
+- **THEN** the attack completes showing how many blocks were sent, the birthday-bound expectation for that block space, and the recovered cookie material
