@@ -7,7 +7,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Text};
-use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::cipher::xor;
 
@@ -247,7 +247,9 @@ impl State {
             )
         };
         frame.render_widget(
-            Paragraph::new(Text::from(body)).block(Block::bordered().title(title)),
+            Paragraph::new(Text::from(body))
+                .block(Block::bordered().title(title))
+                .wrap(Wrap { trim: false }),
             plain_area,
         );
     }
@@ -420,5 +422,24 @@ mod tests {
             "recovered key hex shown"
         );
         assert!(text.contains("POST /login"), "plaintext revealed");
+    }
+
+    #[test]
+    fn recovered_plaintext_wraps_instead_of_truncating() {
+        // Regression: the recovered pane once rendered the plaintext as one
+        // unwrapped line, so anything past the pane width vanished. The
+        // longest session's prose sits well past the first wrapped row.
+        let mut state = State::new();
+        state.handle_key(press(KeyCode::Down));
+        state.handle_key(press(KeyCode::Down)); // static.example.com, longest
+        state.handle_key(press(KeyCode::Enter));
+        for _ in 0..100 {
+            state.tick();
+        }
+        let text = rows_rendered(&state).join("\n");
+        // "english" sits ~90 chars into the plaintext; the pane's first row
+        // holds ~56 — it only renders if the paragraph wraps.
+        assert!(text.contains("english"), "deep plaintext wraps into view");
+        assert!(text.contains("vote"), "tail of the plaintext wraps too");
     }
 }
