@@ -36,8 +36,8 @@ The screen SHALL return to the lesson list, closing the open lesson, on Escape o
 - **THEN** the screen returns to the lesson list with no lesson open
 
 ### Requirement: Shipped lessons cover the implemented attacks
-The screen SHALL ship with at least three lessons matching implemented attacks: Caesar falling to frequency analysis, breaking repeating-XOR, and SWEET32 — the birthday problem against small block ciphers.
+The screen SHALL ship with at least five lessons matching implemented attacks: Caesar falling to frequency analysis, breaking repeating-XOR, SWEET32's birthday problem, FREAK's factoring of export RSA, and Logjam's discrete log against export Diffie–Hellman.
 
 #### Scenario: Both starter lessons are present
 - **WHEN** the lesson list is displayed
-- **THEN** lessons on the Caesar frequency attack, on repeating-XOR, and on the SWEET32 birthday attack are all listed and openable
+- **THEN** lessons on the Caesar frequency attack, repeating-XOR, the SWEET32 birthday attack, FREAK, and Logjam are all listed and openable
