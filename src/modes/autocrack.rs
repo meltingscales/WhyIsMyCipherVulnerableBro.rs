@@ -20,6 +20,12 @@ use crate::cipher::sweet32::{
     DEMO_BLOCK_BITS, Simulator, TICK_STRIDE, expected_collisions, first_collision_expectation,
 };
 use crate::cipher::vigenere;
+use crate::cipher::{dlog, rsa};
+
+/// Rho iterations per tick while FREAK runs.
+const RHO_STRIDE: u64 = 4096;
+/// BSGS steps per tick while Logjam runs.
+const BSGS_STRIDE: u64 = 65_536;
 
 /// The victim ciphers on offer, in list order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,9 +33,17 @@ pub enum Victim {
     Caesar,
     Vigenere,
     Sweet32,
+    Freak,
+    Logjam,
 }
 
-pub const VICTIMS: [Victim; 3] = [Victim::Caesar, Victim::Vigenere, Victim::Sweet32];
+pub const VICTIMS: [Victim; 5] = [
+    Victim::Caesar,
+    Victim::Vigenere,
+    Victim::Sweet32,
+    Victim::Freak,
+    Victim::Logjam,
+];
 
 impl Victim {
     pub fn name(self) -> &'static str {
@@ -37,6 +51,8 @@ impl Victim {
             Victim::Caesar => "Caesar (shift 11)",
             Victim::Vigenere => "Vigenère (key \"lemon\")",
             Victim::Sweet32 => "SWEET32 (birthday attack)",
+            Victim::Freak => "FREAK (export RSA)",
+            Victim::Logjam => "Logjam (export DHE)",
         }
     }
 
@@ -46,12 +62,14 @@ impl Victim {
             Victim::Caesar => "monoalphabetic — dies to frequency analysis",
             Victim::Vigenere => "polyalphabetic — dies to IoC + per-column analysis",
             Victim::Sweet32 => "small block space — dies to the birthday problem",
+            Victim::Freak => "export-grade modulus — dies to factoring",
+            Victim::Logjam => "export-grade group — dies to discrete log",
         }
     }
 
     /// The sample ciphertext this victim carries, derived from the shared
-    /// English sample so every mode tells the same story. SWEET32's
-    /// "ciphertext" is the first few truncated block values of its traffic.
+    /// English sample so every mode tells the same story. The attack demos
+    /// show their parameters instead of text.
     pub fn ciphertext(self) -> String {
         match self {
             Victim::Caesar => caesar::encrypt(ENGLISH_SAMPLE, 11),
@@ -62,6 +80,8 @@ impl Victim {
                 .map(|v| format!("{v:05x}"))
                 .collect::<Vec<_>>()
                 .join(" "),
+            Victim::Freak => format!("N = {} (toy 62-bit export)", rsa::N),
+            Victim::Logjam => format!("p = {}, g = 5 (toy ~2^40 export)", dlog::P),
         }
     }
 }
@@ -85,7 +105,7 @@ pub struct Row {
 
 /// A live attack. `advance` pushes the next row; when the plan is exhausted
 /// the run is `done` and carries the recovered key and plaintext (for
-/// classical victims) or the collision result and leak (for SWEET32).
+/// classical victims) or the structural result and leak (for the attack demos).
 #[derive(Debug, PartialEq)]
 pub struct Run {
     pub victim: Victim,
@@ -99,6 +119,10 @@ pub struct Run {
     scan: Vec<vigenere::KeyLengthScore>,
     /// SWEET32 only: the birthday simulator, stepped `TICK_STRIDE` per tick.
     birthday: Option<Simulator>,
+    /// FREAK only: the rho factoring run.
+    rho: Option<rsa::RhoSolver>,
+    /// Logjam only: the BSGS discrete-log run.
+    bsgs: Option<dlog::BsgsSolver>,
     pub done: bool,
     pub recovered_key: String,
     pub recovered_plaintext: String,
@@ -112,11 +136,19 @@ impl Run {
         let ciphertext = victim.ciphertext();
         let scan = match victim {
             Victim::Vigenere => vigenere::key_length_scan(&ciphertext, 1, VIGENERE_MAX_LEN),
-            Victim::Caesar | Victim::Sweet32 => Vec::new(),
+            _ => Vec::new(),
         };
         let birthday = match victim {
             Victim::Sweet32 => Some(Simulator::demo()),
-            Victim::Caesar | Victim::Vigenere => None,
+            _ => None,
+        };
+        let rho = match victim {
+            Victim::Freak => Some(rsa::RhoSolver::demo()),
+            _ => None,
+        };
+        let bsgs = match victim {
+            Victim::Logjam => Some(dlog::BsgsSolver::demo()),
+            _ => None,
         };
         Self {
             victim,
@@ -126,15 +158,16 @@ impl Run {
             step: 0,
             scan,
             birthday,
+            rho,
+            bsgs,
             done: false,
             recovered_key: String::new(),
             recovered_plaintext: String::new(),
         }
     }
 
-    /// Total steps this run will take (rows it will stream). The birthday
-    /// attack's collision time is a random draw; report the expectation as
-    /// an estimate only.
+    /// Total steps this run will take (rows it will stream). Solver run
+    /// lengths are draws; report expectations as estimates only.
     pub fn total_steps(&self) -> usize {
         match self.victim {
             Victim::Caesar => 26,
@@ -146,6 +179,8 @@ impl Run {
                 / TICK_STRIDE as f64)
                 .ceil() as usize)
                 .max(1),
+            Victim::Freak => 3 + (rsa::expected_iterations() / RHO_STRIDE as f64).ceil() as usize,
+            Victim::Logjam => 3 + (dlog::expected_steps() / BSGS_STRIDE as f64).ceil() as usize,
         }
     }
 
@@ -159,9 +194,13 @@ impl Run {
             Victim::Caesar => self.advance_caesar(),
             Victim::Vigenere => self.advance_vigenere(),
             Victim::Sweet32 => self.advance_birthday(),
+            Victim::Freak => self.advance_freak(),
+            Victim::Logjam => self.advance_logjam(),
         }
         self.step += 1;
-        if self.victim != Victim::Sweet32 {
+        // "Best candidate" is a cryptanalysis concept; the attack demos'
+        // rows have no ordering to highlight.
+        if matches!(self.victim, Victim::Caesar | Victim::Vigenere) {
             // "Best candidate" highlight is a cryptanalysis concept; birthday
             // stats rows have no ordering to highlight.
             self.best_row = self
@@ -267,6 +306,95 @@ impl Run {
             );
             self.recovered_plaintext =
                 format!("leaked cookie: {cookie_hex} (XOR of the colliding records)");
+            self.done = true;
+        }
+    }
+
+    /// One row of the 2015 export-downgrade exchange, indexed by `step`
+    /// (0, 1, 2). `strong` and `weak` name the two sides of the strip.
+    fn push_downgrade_row(&mut self, index: usize, strong: &str, weak: &str) {
+        let (label, note) = match index {
+            0 => ("ClientHello", format!("offers strong {strong}")),
+            1 => ("MITM", format!("strips the offer down to {weak}")),
+            _ => (
+                "ServerHello",
+                "complies — the export key is signed as if strong".to_string(),
+            ),
+        };
+        self.push_row(label.to_string(), 0.0, note);
+    }
+
+    fn advance_freak(&mut self) {
+        if self.step < 3 {
+            self.push_downgrade_row(
+                self.step,
+                "RSA-2048",
+                "RSA_EXPORT (512-bit, 1990s 'export grade')",
+            );
+            return;
+        }
+        let (iterations, factor) = {
+            let solver = self.rho.as_mut().expect("FREAK runs carry a rho solver");
+            solver.step(RHO_STRIDE);
+            (solver.iterations, solver.factor)
+        };
+        let expected = rsa::expected_iterations();
+        self.push_row(
+            format!("rho {iterations:6}"),
+            expected,
+            "gcd(x−y, N) = 1 so far".to_string(),
+        );
+        if let Some(factor) = factor {
+            let other = rsa::N / factor;
+            self.push_row(
+                "FACTOR FOUND".into(),
+                expected,
+                "gcd splits N into two primes".to_string(),
+            );
+            let d = rsa::private_exponent();
+            let decrypted = String::from_utf8_lossy(&{
+                let m = rsa::decrypt_int(rsa::captured_ciphertext(), d);
+                let bytes = m.to_le_bytes();
+                bytes[..rsa::SECRET.len()].to_vec()
+            })
+            .to_string();
+            self.recovered_key = format!(
+                "N = {factor} × {other} after {iterations} iterations (N^¼ ≈ {expected:.0})"
+            );
+            self.recovered_plaintext = format!("d = {d} → premaster secret: {decrypted}");
+            self.done = true;
+        }
+    }
+
+    fn advance_logjam(&mut self) {
+        if self.step < 3 {
+            self.push_downgrade_row(self.step, "DHE-2048", "DHE_EXPORT (512-bit group)");
+            return;
+        }
+        let (steps, built, total_babies, exponent) = {
+            let solver = self.bsgs.as_mut().expect("Logjam runs carry a BSGS solver");
+            solver.step(BSGS_STRIDE);
+            let built = solver.baby_index;
+            let total = solver.m;
+            (solver.steps, built, total, solver.exponent)
+        };
+        let expected = dlog::expected_steps();
+        let note = if built < total_babies {
+            format!("baby steps {built}/{total_babies}")
+        } else {
+            format!("giant probing (baby steps done: {total_babies})")
+        };
+        self.push_row(format!("bsgs {steps:7}"), expected, note);
+        if let Some(y) = exponent {
+            self.push_row(
+                "DISCRETE LOG".into(),
+                expected,
+                "exponent reproduces the server's public value".to_string(),
+            );
+            let secret = dlog::shared_secret();
+            let session = String::from_utf8_lossy(&dlog::decrypt_session(secret)).to_string();
+            self.recovered_key = format!("y = {y} after {steps} steps (√p ≈ {expected:.0})");
+            self.recovered_plaintext = format!("shared secret {secret} → session: {session}");
             self.done = true;
         }
     }
@@ -402,11 +530,11 @@ impl State {
         frame.render_widget(list, list_area);
 
         let status = match (run.victim, run.done) {
-            (Victim::Sweet32, true) => vec![
+            (v, true) if !matches!(v, Victim::Caesar | Victim::Vigenere) => vec![
                 Line::from(format!("Victim:   {}", run.victim.name())),
                 Line::from(format!("Result:   {}", run.recovered_key)),
                 Line::from(format!("Leak:     {}", {
-                    run.recovered_plaintext.chars().take(48).collect::<String>()
+                    run.recovered_plaintext.chars().take(72).collect::<String>()
                 })),
                 Line::from("r — back to victim list"),
             ],
@@ -429,6 +557,24 @@ impl State {
                     run.total_steps() * TICK_STRIDE
                 )),
                 Line::from("waiting for an own/victim block collision…"),
+            ],
+            (Victim::Freak, false) => vec![
+                Line::from(format!("Victim:   {}", run.victim.name())),
+                Line::from(format!(
+                    "rho iterations {} (N^¼ ≈ {:.0})",
+                    run.rho.as_ref().expect("solver present").iterations,
+                    rsa::expected_iterations()
+                )),
+                Line::from("waiting for the export modulus to factor…"),
+            ],
+            (Victim::Logjam, false) => vec![
+                Line::from(format!("Victim:   {}", run.victim.name())),
+                Line::from(format!(
+                    "bsgs steps {} (√p ≈ {:.0})",
+                    run.bsgs.as_ref().expect("solver present").steps,
+                    dlog::expected_steps()
+                )),
+                Line::from("waiting for the discrete log to land…"),
             ],
             (_, false) => vec![
                 Line::from(format!("Victim:   {}", run.victim.name())),
@@ -474,8 +620,12 @@ mod tests {
         assert_eq!(state.phase, Phase::Select { selection: 1 });
         state.handle_key(press(KeyCode::Down));
         assert_eq!(state.phase, Phase::Select { selection: 2 });
+        state.handle_key(press(KeyCode::Down));
+        assert_eq!(state.phase, Phase::Select { selection: 3 });
+        state.handle_key(press(KeyCode::Down));
+        assert_eq!(state.phase, Phase::Select { selection: 4 });
         state.handle_key(press(KeyCode::Down)); // clamps at bottom
-        assert_eq!(state.phase, Phase::Select { selection: 2 });
+        assert_eq!(state.phase, Phase::Select { selection: 4 });
     }
 
     #[test]
@@ -590,6 +740,131 @@ mod tests {
         assert!(text.contains("Result:   birthday collision after"));
         assert!(text.contains("Leak:     leaked cookie: "));
         assert!(text.contains("COLLISION"));
+    }
+
+    #[test]
+    fn freak_run_downgrades_then_factors() {
+        let mut run = Run::new(Victim::Freak);
+        let mut ticks = 0;
+        while !run.done && ticks < 60 {
+            run.advance();
+            ticks += 1;
+        }
+        assert!(run.done, "rho terminates well within 60 ticks");
+        // The downgrade narration comes first.
+        let labels: Vec<&str> = run.rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels[..3], ["ClientHello", "MITM", "ServerHello"]);
+        // Then rho rows, then the factor event.
+        assert!(run.rows[3].label.starts_with("rho"));
+        assert!(run.rows.last().unwrap().label.contains("FACTOR"));
+        assert!(run.recovered_key.contains("after"), "iteration count cited");
+        assert!(run.recovered_key.contains("N^¼ ≈"), "bound cited");
+        assert!(
+            run.recovered_plaintext
+                .contains("premaster secret: PMS-42!")
+        );
+        assert_eq!(
+            run.best_row, None,
+            "no candidate highlight on structural attacks"
+        );
+    }
+
+    #[test]
+    fn logjam_run_downgrades_then_solves_the_dlog() {
+        let mut run = Run::new(Victim::Logjam);
+        let mut ticks = 0;
+        while !run.done && ticks < 80 {
+            run.advance();
+            ticks += 1;
+        }
+        assert!(run.done, "BSGS terminates well within 80 ticks");
+        let labels: Vec<&str> = run.rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels[..3], ["ClientHello", "MITM", "ServerHello"]);
+        assert!(run.rows[3].label.starts_with("bsgs"));
+        assert!(run.rows.last().unwrap().label.contains("DISCRETE LOG"));
+        assert!(run.recovered_key.contains("y = 314159265"), "true exponent");
+        assert!(run.recovered_key.contains("√p ≈"), "bound cited");
+        assert!(run.recovered_plaintext.contains("GET /export HTTP/1.1"));
+        assert_eq!(run.best_row, None);
+    }
+
+    #[test]
+    fn selection_reaches_the_fourth_and_fifth_victims() {
+        let mut state = State::new();
+        for _ in 0..3 {
+            state.handle_key(press(KeyCode::Down));
+        }
+        state.handle_key(press(KeyCode::Enter));
+        match &state.phase {
+            Phase::Running(run) => assert_eq!(run.victim, Victim::Freak),
+            other => panic!("expected running, got {other:?}"),
+        }
+
+        let mut state = State::new();
+        for _ in 0..4 {
+            state.handle_key(press(KeyCode::Down));
+        }
+        state.handle_key(press(KeyCode::Enter));
+        match &state.phase {
+            Phase::Running(run) => assert_eq!(run.victim, Victim::Logjam),
+            other => panic!("expected running, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn export_attacks_render_counters_and_done_chains() {
+        let mut state = State::new();
+        let text = rows_rendered(&state).join("\n");
+        assert!(text.contains("FREAK (export RSA)"), "victim listed");
+        assert!(text.contains("Logjam (export DHE)"), "victim listed");
+
+        // FREAK: downgrade rows then the rho counter, then the full chain.
+        for _ in 0..3 {
+            state.handle_key(press(KeyCode::Down));
+        }
+        state.handle_key(press(KeyCode::Enter));
+        state.tick();
+        let text = rows_rendered(&state).join("\n");
+        assert!(text.contains("ClientHello"), "downgrade narrated");
+        for _ in 0..60 {
+            if let Phase::Running(run) = &state.phase
+                && run.done
+            {
+                break;
+            }
+            state.tick();
+        }
+        let text = rows_rendered(&state).join("\n");
+        assert!(text.contains("rho"), "solver rows streamed");
+        assert!(text.contains("Result:   N = "), "factored result");
+        assert!(
+            text.contains("premaster secret: PMS-42!"),
+            "chain completes"
+        );
+
+        // Logjam: same shape.
+        state.handle_key(press(KeyCode::Char('r')));
+        for _ in 0..4 {
+            state.handle_key(press(KeyCode::Down));
+        }
+        state.handle_key(press(KeyCode::Enter));
+        for _ in 0..80 {
+            if let Phase::Running(run) = &state.phase
+                && run.done
+            {
+                break;
+            }
+            state.tick();
+        }
+        let text = rows_rendered(&state).join("\n");
+        assert!(
+            text.contains("Result:   y = 314159265"),
+            "exponent recovered"
+        );
+        assert!(
+            text.contains("session: GET /export HTTP/1.1"),
+            "session decrypted"
+        );
     }
 
     #[test]

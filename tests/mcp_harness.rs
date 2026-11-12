@@ -144,6 +144,43 @@ fn harness_drives_full_scenarios_end_to_end() {
         snapshot.contains("Leak:     leaked cookie: "),
         "cookie leaked"
     );
+
+    // FREAK scenario: fourth victim, downgrade then factoring, full chain.
+    h.call(20, "reset", json!({}));
+    for _ in 0..3 {
+        h.call(21, "send_key", json!({ "key": "down" }));
+    }
+    h.call(22, "send_key", json!({ "key": "enter" }));
+    h.call(23, "tick", json!({ "n": 40 }));
+    let snapshot = h.snapshot_text(24);
+    assert!(snapshot.contains("Attack — done"), "factoring completed");
+    assert!(snapshot.contains("ClientHello"), "downgrade narrated");
+    assert!(
+        snapshot.contains("Result:   N = "),
+        "factorization reported"
+    );
+    assert!(
+        snapshot.contains("premaster secret: PMS-42!"),
+        "chain completes"
+    );
+
+    // Logjam scenario: fifth victim, downgrade then discrete log.
+    h.call(25, "reset", json!({}));
+    for _ in 0..4 {
+        h.call(26, "send_key", json!({ "key": "down" }));
+    }
+    h.call(27, "send_key", json!({ "key": "enter" }));
+    h.call(28, "tick", json!({ "n": 60 }));
+    let snapshot = h.snapshot_text(29);
+    assert!(snapshot.contains("Attack — done"), "discrete log completed");
+    assert!(
+        snapshot.contains("Result:   y = 314159265"),
+        "exponent recovered"
+    );
+    assert!(
+        snapshot.contains("session: GET /export HTTP/1.1"),
+        "session decrypted"
+    );
 }
 
 #[test]

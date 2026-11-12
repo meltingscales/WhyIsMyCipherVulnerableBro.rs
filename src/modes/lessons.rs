@@ -16,7 +16,7 @@ pub struct Lesson {
 }
 
 /// The shipped starter lessons, matching the attacks the app can run.
-pub const LESSONS: [Lesson; 3] = [
+pub const LESSONS: [Lesson; 5] = [
     Lesson {
         title: "Why Caesar dies — frequency analysis",
         steps: &[
@@ -105,6 +105,78 @@ pub const LESSONS: [Lesson; 3] = [
              and then the collision row lands and the cookie leaks. The \
              lesson underneath: never let a small block space carry \
              long-lived secrets — the math is patient.",
+        ],
+    },
+    Lesson {
+        title: "FREAK — when 'export grade' met factoring",
+        steps: &[
+            "In the 1990s, US export rules capped the crypto shipped \
+             abroad. Servers kept 'export' cipher suites — RSA with a \
+             512-bit key — long after the rules died. The suites lingered \
+             in OpenSSL, Secure Transport, and others, waiting.",
+            "FREAK (2015) needed three actors: a client whose TLS state \
+             machine wrongly accepted an export certificate mid-handshake, \
+             a server that still offered RSA_EXPORT, and a man in the \
+             middle who rewrote the client's offer so the server picked \
+             the weak suite. Watch those three rows open the Autocrack demo.",
+            "The kill chain after the downgrade: factor the 512-bit \
+             modulus N into its primes p and q, compute the private \
+             exponent d = e⁻¹ mod λ(N), and decrypt the premaster secret \
+             the client sent 'in private'. Factoring once breaks every \
+             connection using that export key.",
+            "How hard is factoring? Pollard's rho walks a pseudorandom \
+             sequence mod N until two values collide in a way that exposes \
+             a factor — expected around N^(1/4) steps for a balanced \
+             semiprime. This app's demo modulus is 62 bits, and rho takes \
+             exactly 30782 iterations — right on the N^¼ ≈ 46341 curve.",
+            "A real 512-bit modulus puts N^¼ near 2^128 — not an \
+             afternoon, but roughly a week of cloud computing circa 2015, \
+             and it only has to happen ONCE per export key. Some servers \
+             even shipped the same export key as everyone else, making the \
+             precompute a shared cost. 'Too weak to matter' was really \
+             'too weak to matter yet'.",
+            "The demo's done screen shows the whole chain: both primes, \
+             the derived private exponent, and the premaster secret \
+             falling out of it. The lesson underneath: a cryptographic \
+             algorithm is only as strong as the WEAKEST key anyone can \
+             trick you into using — and downgrade attacks are exactly \
+             that trick.",
+        ],
+    },
+    Lesson {
+        title: "Logjam — discrete logs and the prime everyone shared",
+        steps: &[
+            "Diffie–Hellman lets two parties agree on a secret over a \
+             wire anyone can read: pick a prime p and generator g, publish \
+             g^a and g^b, and both compute g^(ab). The eavesdropper sees \
+             g, g^a, g^b — and must solve the DISCRETE LOG problem to turn \
+             g^a back into a.",
+            "Export rules also strangled DH: DHE_EXPORT used 512-bit \
+             groups. Logjam (2015, same team, same year as FREAK) showed a \
+             man in the middle could rewrite a DH handshake into the \
+             export group — and many servers said yes.",
+            "Baby-step giant-step solves g^y = B in about √p steps: \
+             precompute 'baby steps' g^0..g^(m-1) into a table, then take \
+             'giant strides' of g^(-m) across the space until the target \
+             lands on a table entry. √p is also why key sizes doubled \
+             compared to RSA-era intuition — the attack scales with the \
+             square root, not the fourth root.",
+            "This app's demo group is ~2^40, with the server's exponent y \
+             = 314159265. BSGS finds it in exactly 635043 steps — the \
+             √p ≈ 1048576 curve, live. The done screen shows y, the \
+             shared secret it yields, and the session bytes falling out.",
+            "The twist that made Logjam sting: most DHE_EXPORT servers \
+             used one of TWO standard 512-bit primes. Solve the discrete \
+             log structure of a prime once — a research-budget \
+             precomputation — and every connection using it falls in \
+             minutes. Individual connections were cheap because the \
+             expensive part was amortized across the whole internet.",
+            "The fix was boring and beautiful: delete the export suites, \
+             and standardize on large, well-chosen (or ephemeral) groups. \
+             The lesson underneath, shared with FREAK and SWEET32: \
+             downgrade paths and shared weak parameters turn 'hard for \
+             one attacker' into 'cheap for everyone'. Cryptography \
+             decomposes; good systems don't hand it pieces to eat.",
         ],
     },
 ];
@@ -275,6 +347,58 @@ mod tests {
         assert!(full_text.contains("4744"), "cites the demo's pinned draw");
         assert!(full_text.contains("1281"), "cites the birthday bound");
         assert!(full_text.contains("32 GB"), "cites the real SWEET32 scale");
+    }
+
+    #[test]
+    fn freak_lesson_opens_and_cites_the_solvers_numbers() {
+        let mut state = State::new();
+        for _ in 0..3 {
+            state.handle_key(press(KeyCode::Down));
+        }
+        state.handle_key(press(KeyCode::Enter));
+        assert_eq!(state.open, Some((3, 0)));
+
+        let last = LESSONS[3].steps.len() - 1;
+        let mut full_text = rows_rendered(&state).join("\n");
+        for _ in 0..last {
+            state.handle_key(press(KeyCode::Right));
+            full_text.push('\n');
+            full_text.push_str(&rows_rendered(&state).join("\n"));
+        }
+        assert!(
+            full_text.contains("30782"),
+            "cites the pinned rho iterations"
+        );
+        assert!(full_text.contains("46341"), "cites the N^¼ curve");
+        assert!(
+            full_text.contains("512-bit"),
+            "cites the real export modulus"
+        );
+    }
+
+    #[test]
+    fn logjam_lesson_opens_and_cites_the_solvers_numbers() {
+        let mut state = State::new();
+        for _ in 0..4 {
+            state.handle_key(press(KeyCode::Down));
+        }
+        state.handle_key(press(KeyCode::Enter));
+        assert_eq!(state.open, Some((4, 0)));
+
+        let last = LESSONS[4].steps.len() - 1;
+        let mut full_text = rows_rendered(&state).join("\n");
+        for _ in 0..last {
+            state.handle_key(press(KeyCode::Right));
+            full_text.push('\n');
+            full_text.push_str(&rows_rendered(&state).join("\n"));
+        }
+        assert!(full_text.contains("635043"), "cites the pinned BSGS steps");
+        assert!(full_text.contains("1048576"), "cites the √p curve");
+        // single word: wrapped rows split phrases across lines
+        assert!(
+            full_text.contains("amortized"),
+            "cites the shared-prime twist"
+        );
     }
 
     #[test]

@@ -39,11 +39,22 @@ fn samples() -> Vec<Sample> {
     ]
 }
 
-/// Which chart the screen shows; `v` toggles.
+/// Which chart the screen shows; `v` cycles them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Frequency,
     Birthday,
+    Cost,
+}
+
+impl View {
+    fn next(self) -> Self {
+        match self {
+            View::Frequency => View::Birthday,
+            View::Birthday => View::Cost,
+            View::Cost => View::Frequency,
+        }
+    }
 }
 
 /// Math Views screen state.
@@ -91,10 +102,7 @@ impl State {
                 self.sample = (self.sample + 1) % samples().len();
             }
             KeyCode::Char('v') => {
-                self.view = match self.view {
-                    View::Frequency => View::Birthday,
-                    View::Birthday => View::Frequency,
-                };
+                self.view = self.view.next();
             }
             _ => {}
         }
@@ -112,6 +120,7 @@ impl State {
         match self.view {
             View::Frequency => self.render_frequency(frame, area),
             View::Birthday => Self::render_birthday(frame, area),
+            View::Cost => Self::render_cost(frame, area),
         }
     }
 
@@ -203,6 +212,97 @@ impl State {
         .block(Block::bordered());
         frame.render_widget(stats, stats_area);
     }
+
+    /// Observed vs expected solver costs at several problem sizes, computed
+    /// once by actually running the solvers. Log-scaled so four decades of
+    /// step counts share one chart.
+    fn cost_series() -> &'static [(&'static str, u64, f64)] {
+        static SERIES: std::sync::OnceLock<Vec<(&'static str, u64, f64)>> =
+            std::sync::OnceLock::new();
+        SERIES.get_or_init(|| {
+            let mut rho = crate::cipher::rsa::RhoSolver::new(crate::cipher::rsa::N);
+            while rho.factor.is_none() {
+                rho.step(8192);
+            }
+            let mut rho2 = crate::cipher::rsa::RhoSolver::new(crate::cipher::rsa::N2);
+            while rho2.factor.is_none() {
+                rho2.step(8192);
+            }
+            let run_bsgs = |p: u64, g: u64, target: u64| {
+                let mut solver = crate::cipher::dlog::BsgsSolver::new(p, g, target);
+                while solver.exponent.is_none() {
+                    solver.step(131_072);
+                }
+                solver.steps
+            };
+            let steps = run_bsgs(
+                crate::cipher::dlog::P,
+                crate::cipher::dlog::G,
+                crate::cipher::dlog::server_public(),
+            );
+            let steps2 = run_bsgs(
+                crate::cipher::dlog::P2,
+                crate::cipher::dlog::G2,
+                crate::cipher::dlog::second_target(),
+            );
+            vec![
+                (
+                    "rho62",
+                    rho.iterations,
+                    crate::cipher::rsa::expected_iterations(),
+                ),
+                (
+                    "rho63",
+                    rho2.iterations,
+                    (crate::cipher::rsa::N2 as f64).powf(0.25),
+                ),
+                ("bs40", steps, crate::cipher::dlog::expected_steps()),
+                (
+                    "bs38",
+                    steps2,
+                    ((crate::cipher::dlog::P2 - 1) as f64).sqrt(),
+                ),
+            ]
+        })
+    }
+
+    fn render_cost(frame: &mut Frame, area: Rect) {
+        let [chart_area, stats_area] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(4)]).areas(area);
+
+        let log10_bar = |steps: f64| (steps.log10() * 10_000.0).round() as u64;
+        let observed: Vec<Bar> = Self::cost_series()
+            .iter()
+            .map(|&(label, steps, _)| {
+                Bar::default()
+                    .label(label)
+                    .value(log10_bar(steps as f64))
+                    .style(Style::default().fg(ratatui::style::Color::Cyan))
+            })
+            .collect();
+        let expected: Vec<Bar> = Self::cost_series()
+            .iter()
+            .map(|&(label, _, expected)| {
+                Bar::default()
+                    .label(label)
+                    .value(log10_bar(expected))
+                    .style(Style::default().fg(ratatui::style::Color::Magenta))
+            })
+            .collect();
+        let chart = BarChart::new(observed)
+            .data(BarGroup::new(expected))
+            .block(Block::bordered().title(" Attack cost — solver steps "))
+            .bar_width(5)
+            .bar_gap(1);
+        frame.render_widget(chart, chart_area);
+
+        let stats = Paragraph::new(Text::from(vec![
+            Line::from("log10 steps: observed (cyan) vs expected (magenta)"),
+            Line::from("rho ≈ N^¼, bsgs ≈ √p; brute force would be N — far off-chart"),
+        ]))
+        .block(Block::bordered());
+        frame.render_widget(stats, stats_area);
+    }
 }
 
 #[cfg(test)]
@@ -275,16 +375,40 @@ mod tests {
     }
 
     #[test]
-    fn v_toggles_between_frequency_and_birthday_views() {
+    fn v_cycles_frequency_birthday_cost_and_back() {
         let mut state = State::new();
         assert_eq!(state.view, View::Frequency);
         state.handle_key(press(KeyCode::Char('v')));
         assert_eq!(state.view, View::Birthday);
-        // Arrows keep cycling samples in either view (harmless in birthday).
+        state.handle_key(press(KeyCode::Char('v')));
+        assert_eq!(state.view, View::Cost);
+        // Arrows keep cycling samples in any view (harmless in the charts).
         state.handle_key(press(KeyCode::Right));
         assert_eq!(state.sample, 1);
         state.handle_key(press(KeyCode::Char('v')));
         assert_eq!(state.view, View::Frequency);
+    }
+
+    #[test]
+    fn cost_view_renders_both_labeled_series() {
+        let mut state = State::new();
+        state.handle_key(press(KeyCode::Char('v')));
+        state.handle_key(press(KeyCode::Char('v')));
+        assert_eq!(state.view, View::Cost);
+        let text = rows_rendered(&state).join("\n");
+        assert!(text.contains("Attack cost — solver steps"), "view named");
+        assert!(
+            text.contains("rho62") && text.contains("rho63"),
+            "rho series labeled"
+        );
+        assert!(
+            text.contains("bs40") && text.contains("bs38"),
+            "bsgs series labeled"
+        );
+        assert!(
+            text.contains("observed (cyan) vs expected (magenta)"),
+            "series labeled"
+        );
     }
 
     #[test]

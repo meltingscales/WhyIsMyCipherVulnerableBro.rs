@@ -32,8 +32,8 @@ Pre-alpha — currently a skeleton. Roadmap:
 
 - [x] Core TUI framework + navigation
 - [x] SWEET32 demo
-- [ ] FREAK demo
-- [ ] Logjam demo
+- [x] FREAK demo
+- [x] Logjam demo
 - [ ] Traffic simulator mode
 - [ ] Autocrack mode with visuals
 - [ ] Cryptopals-style lessons
