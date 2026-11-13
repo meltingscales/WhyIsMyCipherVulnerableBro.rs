@@ -1,13 +1,17 @@
-//! Crossterm event handling: maps key presses to app actions and provides
-//! the tick heartbeat the animated demos draw against.
+//! Crossterm event handling: maps key presses and mouse clicks to app
+//! actions and provides the tick heartbeat the animated demos draw against.
 //!
 //! Global keys (mode switching, quit) are claimed before any mode sees them;
-//! every other key press routes to the active mode's handler.
+//! every other key press routes to the active mode's handler. Left-clicks
+//! translate to [`AppEvent::MouseClick`]; all other mouse activity is ignored.
 
 use std::io;
 use std::time::Duration;
 
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
 
 /// A resolved global action for the main loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,12 +22,13 @@ pub enum Action {
     Quit,
 }
 
-/// One event for the main loop: a resolved global action, a key press for the
-/// active mode to interpret, or the animation heartbeat.
+/// One event for the main loop: a resolved global action, a key press or a
+/// left-click for the active mode to interpret, or the animation heartbeat.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
     Global(Action),
     ModeKey(KeyEvent),
+    MouseClick { column: u16, row: u16 },
     Tick,
 }
 
@@ -69,6 +74,15 @@ pub fn classify(key: KeyEvent) -> Option<KeyClass> {
 /// Wait up to `timeout` for the next input event: global keys resolve to
 /// their action, other key presses pass through for the active mode,
 /// non-key events are ignored, and a timeout yields [`AppEvent::Tick`].
+/// Only left-button presses become clicks; moves, releases, drags, wheels,
+/// and other buttons are ignored.
+pub fn mouse_to_click(mouse: MouseEvent) -> Option<(u16, u16)> {
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => Some((mouse.column, mouse.row)),
+        _ => None,
+    }
+}
+
 pub fn next_app_event(timeout: Duration) -> io::Result<Option<AppEvent>> {
     if event::poll(timeout)? {
         match event::read()? {
@@ -79,6 +93,9 @@ pub fn next_app_event(timeout: Duration) -> io::Result<Option<AppEvent>> {
                 Some(KeyClass::Mode) => Ok(Some(AppEvent::ModeKey(key))),
                 None => Ok(None),
             },
+            Event::Mouse(mouse) => {
+                Ok(mouse_to_click(mouse).map(|(column, row)| AppEvent::MouseClick { column, row }))
+            }
             _ => Ok(None),
         }
     } else {
@@ -185,6 +202,33 @@ mod tests {
             press(KeyCode::Char('r'), KeyModifiers::NONE),
         ] {
             assert_eq!(classify(key), Some(KeyClass::Mode), "{key:?}");
+        }
+    }
+
+    fn mouse(kind: MouseEventKind) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 7,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn only_left_presses_become_clicks() {
+        assert_eq!(
+            mouse_to_click(mouse(MouseEventKind::Down(MouseButton::Left))),
+            Some((7, 3))
+        );
+        for inert in [
+            MouseEventKind::Down(MouseButton::Right),
+            MouseEventKind::Down(MouseButton::Middle),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Moved,
+            MouseEventKind::ScrollDown,
+            MouseEventKind::ScrollUp,
+        ] {
+            assert_eq!(mouse_to_click(mouse(inert)), None, "{inert:?}");
         }
     }
 

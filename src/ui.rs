@@ -10,9 +10,9 @@ use ratatui::widgets::{Block, Paragraph, Tabs};
 use crate::app::{ALL_MODES, App, Mode};
 
 /// Global keybindings shown in the footer on every screen.
-pub const FOOTER_TEXT: &str = "Tab/Shift+Tab switch · 1-4 select mode · q or Ctrl-C quits";
+pub const FOOTER_TEXT: &str = "Tab/1-4 switch · q quits · mouse works";
 
-pub fn render(frame: &mut Frame, app: &App) {
+pub fn render(frame: &mut Frame, app: &mut App) {
     let [tabs_area, body_area, footer_area] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(0),
@@ -24,7 +24,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     render_footer(frame, footer_area, app);
 }
 
-fn render_tabs(frame: &mut Frame, area: Rect, app: &App) {
+fn render_tabs(frame: &mut Frame, area: Rect, app: &mut App) {
     let titles: Vec<Line> = ALL_MODES
         .iter()
         .enumerate()
@@ -35,10 +35,41 @@ fn render_tabs(frame: &mut Frame, area: Rect, app: &App) {
         .select(app.mode.index())
         .highlight_style(Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD));
     frame.render_widget(tabs, area);
+
+    // Record each tab's clickable rect from the buffer that was actually
+    // drawn — the Tabs widget's padding and divider widths are its business,
+    // not ours to re-derive. Titles are unique ASCII, so a row scan finds
+    // each one exactly where it rendered.
+    app.tab_hits.clear();
+    let inner = {
+        let mut inner = area;
+        inner.x += 1;
+        inner.y += 1;
+        inner.width = inner.width.saturating_sub(2);
+        inner.height = inner.height.saturating_sub(2);
+        inner
+    };
+    let buffer = frame.buffer_mut();
+    let row: String = (inner.x..inner.x + inner.width)
+        .map(|x| buffer[(x, inner.y)].symbol().chars().next().unwrap_or(' '))
+        .collect();
+    for (i, mode) in ALL_MODES.iter().enumerate() {
+        let title = format!("{}: {}", i + 1, mode.title());
+        if let Some(byte_index) = row.find(&title) {
+            let char_index = row[..byte_index].chars().count() as u16;
+            let rect = Rect {
+                x: inner.x + char_index,
+                y: inner.y,
+                width: title.chars().count() as u16,
+                height: 1,
+            };
+            app.tab_hits.push((rect, i));
+        }
+    }
 }
 
 /// Dispatch the body to the active mode's renderer.
-fn render_body(frame: &mut Frame, area: Rect, app: &App) {
+fn render_body(frame: &mut Frame, area: Rect, app: &mut App) {
     match app.mode {
         Mode::Autocrack => app.autocrack.render(frame, area),
         Mode::TrafficSimulator => app.traffic.render(frame, area),
@@ -66,7 +97,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     /// Render `app` into a test terminal and return the buffer.
-    fn render_app(app: &App) -> ratatui::buffer::Buffer {
+    fn render_app(app: &mut App) -> ratatui::buffer::Buffer {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|frame| render(frame, app)).unwrap();
         terminal.backend().buffer().clone()
@@ -86,7 +117,7 @@ mod tests {
     fn tab_bar_lists_all_modes_with_active_one_highlighted() {
         let mut app = App::new();
         app.select(2); // Lessons
-        let buffer = render_app(&app);
+        let buffer = render_app(&mut app);
         let tab_row = rows(&buffer)
             .into_iter()
             .find(|row| row.contains("Autocrack") && row.contains("Math Views"))
@@ -124,7 +155,7 @@ mod tests {
         for mode in ALL_MODES {
             let mut app = App::new();
             app.select(mode.index());
-            let buffer = render_app(&app);
+            let buffer = render_app(&mut app);
             let text = rows(&buffer).join("\n");
             assert!(
                 text.contains(FOOTER_TEXT),
@@ -138,12 +169,12 @@ mod tests {
     fn footer_shows_the_active_modes_hints_only() {
         let mut app = App::new();
         app.select(Mode::TrafficSimulator.index());
-        let text = rows(&render_app(&app)).join("\n");
+        let text = rows(&render_app(&mut app)).join("\n");
         assert!(text.contains("Up/Dn session"), "active hints shown");
         assert!(!text.contains("victim"), "other modes' hints hidden");
 
         app.select(Mode::MathViews.index());
-        let text = rows(&render_app(&app)).join("\n");
+        let text = rows(&render_app(&mut app)).join("\n");
         assert!(text.contains("Left/Right sample"), "active hints shown");
         assert!(!text.contains("lesson"), "other modes' hints hidden");
     }
@@ -152,7 +183,7 @@ mod tests {
     fn body_dispatches_to_the_active_modes_renderer() {
         let mut app = App::new();
         app.select(Mode::MathViews.index());
-        let text = rows(&render_app(&app)).join("\n");
+        let text = rows(&render_app(&mut app)).join("\n");
         assert!(text.contains("Math Views"), "active mode's body renders");
     }
 }

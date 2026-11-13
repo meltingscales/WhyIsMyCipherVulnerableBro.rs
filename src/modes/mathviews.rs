@@ -57,6 +57,15 @@ impl View {
     }
 }
 
+/// What a click on the last rendered frame meant, per recorded rect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Hit {
+    /// The left half of the chart area: click cycles to the previous sample.
+    ChartPrev,
+    /// The right half: next sample.
+    ChartNext,
+}
+
 /// Math Views screen state.
 #[derive(Debug)]
 pub struct State {
@@ -64,6 +73,8 @@ pub struct State {
     pub sample: usize,
     /// The active chart.
     pub view: View,
+    /// Clickable rects recorded by the last render (immediate-mode hits).
+    pub(crate) hit: Vec<(Rect, Hit)>,
     /// Test seam: the last key routed here (only the active mode receives keys).
     pub(crate) last_key: Option<KeyEvent>,
     /// Test seam: ticks received while this mode is active.
@@ -75,6 +86,7 @@ impl State {
         Self {
             sample: 0,
             view: View::Frequency,
+            hit: Vec::new(),
             last_key: None,
             tick_count: 0,
         }
@@ -116,19 +128,59 @@ impl State {
         "Left/Right sample · v view"
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect) {
-        match self.view {
-            View::Frequency => self.render_frequency(frame, area),
-            View::Birthday => Self::render_birthday(frame, area),
-            View::Cost => Self::render_cost(frame, area),
+    /// Handle a routed left-click: the left half of the chart area cycles
+    /// to the previous sample, the right half to the next, in every view.
+    pub fn click(&mut self, pos: ratatui::layout::Position) -> &'static str {
+        if let Some(&(_, hit)) = self.hit.iter().find(|(rect, _)| rect.contains(pos)) {
+            let len = samples().len();
+            self.sample = match hit {
+                Hit::ChartPrev => (self.sample + len - 1) % len,
+                Hit::ChartNext => (self.sample + 1) % len,
+            };
+            "mathviews:sample"
+        } else {
+            "mathviews:inert"
         }
     }
 
-    fn render_frequency(&self, frame: &mut Frame, area: Rect) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
+        match self.view {
+            View::Frequency => self.render_frequency(frame, area),
+            View::Birthday => self.render_birthday(frame, area),
+            View::Cost => self.render_cost(frame, area),
+        }
+    }
+
+    /// Record the chart area's halves as this view's clickable rects.
+    fn record_chart_halves(&mut self, chart_area: Rect) {
+        self.hit.clear();
+        let half = chart_area.width / 2;
+        self.hit.push((
+            Rect {
+                x: chart_area.x,
+                y: chart_area.y,
+                width: half,
+                height: chart_area.height,
+            },
+            Hit::ChartPrev,
+        ));
+        self.hit.push((
+            Rect {
+                x: chart_area.x + half,
+                y: chart_area.y,
+                width: chart_area.width - half,
+                height: chart_area.height,
+            },
+            Hit::ChartNext,
+        ));
+    }
+
+    fn render_frequency(&mut self, frame: &mut Frame, area: Rect) {
         let samples = samples();
         let sample = &samples[self.sample % samples.len()];
         let [chart_area, stats_area] =
             Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).areas(area);
+        self.record_chart_halves(chart_area);
 
         let counts = letter_counts(&sample.text);
         let total: usize = counts.iter().sum();
@@ -176,9 +228,10 @@ impl State {
         })
     }
 
-    fn render_birthday(frame: &mut Frame, area: Rect) {
+    fn render_birthday(&mut self, frame: &mut Frame, area: Rect) {
         let [chart_area, stats_area] =
             Layout::vertical([Constraint::Min(0), Constraint::Length(4)]).areas(area);
+        self.record_chart_halves(chart_area);
 
         let observed: Vec<Bar> = Self::birthday_checkpoints()
             .iter()
@@ -266,9 +319,10 @@ impl State {
         })
     }
 
-    fn render_cost(frame: &mut Frame, area: Rect) {
+    fn render_cost(&mut self, frame: &mut Frame, area: Rect) {
         let [chart_area, stats_area] =
             Layout::vertical([Constraint::Min(0), Constraint::Length(4)]).areas(area);
+        self.record_chart_halves(chart_area);
 
         let log10_bar = |steps: f64| (steps.log10() * 10_000.0).round() as u64;
         let observed: Vec<Bar> = Self::cost_series()
@@ -316,7 +370,7 @@ mod tests {
         KeyEvent::new(code, ratatui::crossterm::event::KeyModifiers::NONE)
     }
 
-    fn rows_rendered(state: &State) -> Vec<String> {
+    fn rows_rendered(state: &mut State) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| state.render(f, f.area())).unwrap();
         let buffer = terminal.backend().buffer();
@@ -357,8 +411,8 @@ mod tests {
 
     #[test]
     fn chart_renders_sample_name_letters_and_statistics() {
-        let state = State::new();
-        let text = rows_rendered(&state).join("\n");
+        let mut state = State::new();
+        let text = rows_rendered(&mut state).join("\n");
         assert!(
             text.contains("Letter frequency — English plaintext"),
             "sample named"
@@ -372,6 +426,27 @@ mod tests {
             text.contains("index of coincidence:"),
             "IoC readout renders"
         );
+    }
+
+    #[test]
+    fn chart_halves_cycle_samples_in_every_view() {
+        for view in [View::Frequency, View::Birthday, View::Cost] {
+            let mut state = State::new();
+            state.view = view;
+            let _ = rows_rendered(&mut state);
+            let (left, _) = state.hit[0];
+            let (right, _) = state.hit[1];
+            state.click(ratatui::layout::Position {
+                x: right.x + 1,
+                y: right.y + 1,
+            });
+            assert_eq!(state.sample, 1, "{view:?}: right half advances");
+            state.click(ratatui::layout::Position {
+                x: left.x + 1,
+                y: left.y + 1,
+            });
+            assert_eq!(state.sample, 0, "{view:?}: left half goes back");
+        }
     }
 
     #[test]
@@ -395,7 +470,7 @@ mod tests {
         state.handle_key(press(KeyCode::Char('v')));
         state.handle_key(press(KeyCode::Char('v')));
         assert_eq!(state.view, View::Cost);
-        let text = rows_rendered(&state).join("\n");
+        let text = rows_rendered(&mut state).join("\n");
         assert!(text.contains("Attack cost — solver steps"), "view named");
         assert!(
             text.contains("rho62") && text.contains("rho63"),
@@ -415,7 +490,7 @@ mod tests {
     fn birthday_view_renders_both_labeled_series() {
         let mut state = State::new();
         state.handle_key(press(KeyCode::Char('v')));
-        let text = rows_rendered(&state).join("\n");
+        let text = rows_rendered(&mut state).join("\n");
         assert!(
             text.contains("Birthday collisions — 2^20 block space"),
             "view named"
@@ -434,12 +509,12 @@ mod tests {
     #[test]
     fn switching_samples_updates_name_and_readouts() {
         let mut state = State::new();
-        let plaintext_chi_row = rows_rendered(&state)
+        let plaintext_chi_row = rows_rendered(&mut state)
             .into_iter()
             .find(|r| r.contains("chi-squared"))
             .expect("stats row");
         state.handle_key(press(KeyCode::Right));
-        let caesar_text = rows_rendered(&state).join("\n");
+        let caesar_text = rows_rendered(&mut state).join("\n");
         assert!(caesar_text.contains("Caesar ciphertext"), "name updates");
         let caesar_chi_row = caesar_text
             .lines()

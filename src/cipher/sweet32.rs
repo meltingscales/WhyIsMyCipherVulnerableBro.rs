@@ -95,6 +95,7 @@ pub struct Collision {
 ///
 /// `PartialEq`/`Debug` compare the observable attack state, not the cipher
 /// (the demo key is a constant, so equal state implies equal cipher).
+#[derive(Clone)]
 pub struct Simulator {
     bits: u32,
     cipher: Aes128,

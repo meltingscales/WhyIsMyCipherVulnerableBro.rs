@@ -181,12 +181,21 @@ pub const LESSONS: [Lesson; 5] = [
     },
 ];
 
+/// What a click on the last rendered frame meant, per recorded rect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Hit {
+    /// A lesson row in the list: click opens it at step one.
+    Lesson(usize),
+}
+
 /// Lessons screen state: the open lesson and the current step, if any.
 #[derive(Debug)]
 pub struct State {
     /// `(lesson index, step)` while a lesson is open.
     pub open: Option<(usize, usize)>,
     pub selection: usize,
+    /// Clickable rects recorded by the last render (immediate-mode hits).
+    pub(crate) hit: Vec<(Rect, Hit)>,
     /// Test seam: the last key routed here (only the active mode receives keys).
     pub(crate) last_key: Option<KeyEvent>,
     /// Test seam: ticks received while this mode is active.
@@ -198,6 +207,7 @@ impl State {
         Self {
             open: None,
             selection: 0,
+            hit: Vec::new(),
             last_key: None,
             tick_count: 0,
         }
@@ -250,14 +260,30 @@ impl State {
         "Up/Dn lesson · Left/Right step · Esc list"
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect) {
+    /// Handle a routed left-click: clicking a lesson row opens that lesson
+    /// at step one; clicks while a lesson is open are inert.
+    pub fn click(&mut self, pos: ratatui::layout::Position) -> &'static str {
+        if self.open.is_some() {
+            return "lessons:inert";
+        }
+        if let Some(&(_, Hit::Lesson(index))) = self.hit.iter().find(|(rect, _)| rect.contains(pos))
+        {
+            self.selection = index;
+            self.open = Some((index, 0));
+            "lessons:lesson"
+        } else {
+            "lessons:inert"
+        }
+    }
+
+    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         match self.open {
             Some((lesson, step)) => self.render_lesson(frame, area, lesson, step),
             None => self.render_list(frame, area),
         }
     }
 
-    fn render_list(&self, frame: &mut Frame, area: Rect) {
+    fn render_list(&mut self, frame: &mut Frame, area: Rect) {
         let items: Vec<ListItem> = LESSONS
             .iter()
             .map(|lesson| {
@@ -268,12 +294,36 @@ impl State {
                 )))
             })
             .collect();
+        let selection = self.selection;
         let mut list_state = ListState::default();
-        list_state.select(Some(self.selection));
+        list_state.select(Some(selection));
         let list = List::new(items)
             .block(Block::bordered().title(" Lessons "))
             .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
         frame.render_stateful_widget(list, area, &mut { list_state });
+
+        // Each lesson is a single row from the list's inner top.
+        self.hit.clear();
+        let mut inner = area;
+        inner.x += 1;
+        inner.y += 1;
+        inner.width = inner.width.saturating_sub(2);
+        inner.height = inner.height.saturating_sub(2);
+        for i in 0..LESSONS.len() {
+            let y = inner.y.saturating_add(i as u16);
+            if y >= inner.y + inner.height {
+                break;
+            }
+            self.hit.push((
+                Rect {
+                    x: inner.x,
+                    y,
+                    width: inner.width,
+                    height: 1,
+                },
+                Hit::Lesson(i),
+            ));
+        }
     }
 
     fn render_lesson(&self, frame: &mut Frame, area: Rect, lesson: usize, step: usize) {
@@ -305,7 +355,7 @@ mod tests {
         KeyEvent::new(code, ratatui::crossterm::event::KeyModifiers::NONE)
     }
 
-    fn rows_rendered(state: &State) -> Vec<String> {
+    fn rows_rendered(state: &mut State) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| state.render(f, f.area())).unwrap();
         let buffer = terminal.backend().buffer();
@@ -319,9 +369,33 @@ mod tests {
     }
 
     #[test]
+    fn clicking_a_lesson_opens_it_at_step_one() {
+        let mut state = State::new();
+        let _ = rows_rendered(&mut state);
+        let (rect, _) = state.hit[2]; // SWEET32 lesson
+        let routed = state.click(ratatui::layout::Position {
+            x: rect.x + 2,
+            y: rect.y,
+        });
+        assert_eq!(routed, "lessons:lesson");
+        assert_eq!(state.open, Some((2, 0)));
+        assert_eq!(state.selection, 2);
+    }
+
+    #[test]
+    fn clicks_while_a_lesson_is_open_are_inert() {
+        let mut state = State::new();
+        state.handle_key(press(KeyCode::Enter));
+        let _ = rows_rendered(&mut state);
+        let routed = state.click(ratatui::layout::Position { x: 5, y: 5 });
+        assert_eq!(routed, "lessons:inert");
+        assert_eq!(state.open, Some((0, 0)));
+    }
+
+    #[test]
     fn list_shows_both_starter_lessons() {
-        let state = State::new();
-        let text = rows_rendered(&state).join("\n");
+        let mut state = State::new();
+        let text = rows_rendered(&mut state).join("\n");
         assert!(text.contains("Why Caesar dies — frequency analysis"));
         assert!(text.contains("Breaking repeating-XOR"));
         assert!(text.contains("SWEET32 — the birthday problem kills 3DES"));
@@ -338,11 +412,11 @@ mod tests {
 
         // Walk every step; the prose cites the pinned simulator numbers.
         let last = LESSONS[2].steps.len() - 1;
-        let mut full_text = rows_rendered(&state).join("\n");
+        let mut full_text = rows_rendered(&mut state).join("\n");
         for _ in 0..last {
             state.handle_key(press(KeyCode::Right));
             full_text.push('\n');
-            full_text.push_str(&rows_rendered(&state).join("\n"));
+            full_text.push_str(&rows_rendered(&mut state).join("\n"));
         }
         assert!(full_text.contains("4744"), "cites the demo's pinned draw");
         assert!(full_text.contains("1281"), "cites the birthday bound");
@@ -359,11 +433,11 @@ mod tests {
         assert_eq!(state.open, Some((3, 0)));
 
         let last = LESSONS[3].steps.len() - 1;
-        let mut full_text = rows_rendered(&state).join("\n");
+        let mut full_text = rows_rendered(&mut state).join("\n");
         for _ in 0..last {
             state.handle_key(press(KeyCode::Right));
             full_text.push('\n');
-            full_text.push_str(&rows_rendered(&state).join("\n"));
+            full_text.push_str(&rows_rendered(&mut state).join("\n"));
         }
         assert!(
             full_text.contains("30782"),
@@ -386,11 +460,11 @@ mod tests {
         assert_eq!(state.open, Some((4, 0)));
 
         let last = LESSONS[4].steps.len() - 1;
-        let mut full_text = rows_rendered(&state).join("\n");
+        let mut full_text = rows_rendered(&mut state).join("\n");
         for _ in 0..last {
             state.handle_key(press(KeyCode::Right));
             full_text.push('\n');
-            full_text.push_str(&rows_rendered(&state).join("\n"));
+            full_text.push_str(&rows_rendered(&mut state).join("\n"));
         }
         assert!(full_text.contains("635043"), "cites the pinned BSGS steps");
         assert!(full_text.contains("1048576"), "cites the √p curve");
@@ -407,7 +481,7 @@ mod tests {
         state.handle_key(press(KeyCode::Down));
         state.handle_key(press(KeyCode::Enter));
         assert_eq!(state.open, Some((1, 0)));
-        let text = rows_rendered(&state).join("\n");
+        let text = rows_rendered(&mut state).join("\n");
         assert!(text.contains("step 1 of"), "counter starts at 1 of N");
         assert!(text.contains("XOR with a repeating key"), "first step body");
     }
@@ -450,7 +524,7 @@ mod tests {
         state.handle_key(press(KeyCode::Enter));
         state.handle_key(press(KeyCode::Right));
         state.handle_key(press(KeyCode::Right));
-        let text = rows_rendered(&state).join("\n");
+        let text = rows_rendered(&mut state).join("\n");
         assert!(text.contains("step 3 of 6"), "counter shows current step");
         // Single words: wrapped lines break between words, so multi-word
         // phrases can straddle a row boundary.
@@ -460,7 +534,7 @@ mod tests {
         );
 
         state.handle_key(press(KeyCode::Right));
-        let text = rows_rendered(&state).join("\n");
+        let text = rows_rendered(&mut state).join("\n");
         assert!(text.contains("step 4 of 6"));
         assert!(text.contains("chi-squared"), "fourth step's content");
     }

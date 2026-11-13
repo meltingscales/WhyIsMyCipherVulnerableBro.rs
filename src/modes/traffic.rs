@@ -89,11 +89,20 @@ impl Session {
     }
 }
 
+/// What a click on the last rendered frame meant, per recorded rect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Hit {
+    /// A session row in the list: click selects and decrypts.
+    Session(usize),
+}
+
 /// Traffic Simulator screen state.
 #[derive(Debug)]
 pub struct State {
     pub sessions: Vec<Session>,
     pub selection: usize,
+    /// Clickable rects recorded by the last render (immediate-mode hits).
+    pub(crate) hit: Vec<(Rect, Hit)>,
     /// Test seam: the last key routed here (only the active mode receives keys).
     pub(crate) last_key: Option<KeyEvent>,
     /// Test seam: ticks received while this mode is active.
@@ -105,6 +114,7 @@ impl State {
         Self {
             sessions: TEMPLATES.iter().map(Session::from_template).collect(),
             selection: 0,
+            hit: Vec::new(),
             last_key: None,
             tick_count: 0,
         }
@@ -174,7 +184,21 @@ impl State {
         "Up/Dn session · Enter decrypt · r reset"
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect) {
+    /// Handle a routed left-click: clicking a session row selects it and
+    /// runs its decrypt; clicks outside the list are inert.
+    pub fn click(&mut self, pos: ratatui::layout::Position) -> &'static str {
+        if let Some(&(_, Hit::Session(index))) =
+            self.hit.iter().find(|(rect, _)| rect.contains(pos))
+        {
+            self.selection = index;
+            self.decrypt_selected();
+            "traffic:session"
+        } else {
+            "traffic:inert"
+        }
+    }
+
+    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         let [list_area, detail_area] =
             Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
                 .areas(area);
@@ -182,7 +206,7 @@ impl State {
         self.render_detail(frame, detail_area);
     }
 
-    fn render_list(&self, frame: &mut Frame, area: Rect) {
+    fn render_list(&mut self, frame: &mut Frame, area: Rect) {
         let items: Vec<ListItem> = self
             .sessions
             .iter()
@@ -207,12 +231,37 @@ impl State {
                 ]))
             })
             .collect();
+        let selection = self.selection;
         let mut list_state = ListState::default();
-        list_state.select(Some(self.selection));
+        list_state.select(Some(selection));
         let list = List::new(items)
             .block(Block::bordered().title(" Intercepted sessions "))
             .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
         frame.render_stateful_widget(list, area, &mut { list_state });
+
+        // Each session item is two rows (hostname, status) from the list's
+        // inner top; record them as the clickable rows.
+        self.hit.clear();
+        let mut inner = area;
+        inner.x += 1;
+        inner.y += 1;
+        inner.width = inner.width.saturating_sub(2);
+        inner.height = inner.height.saturating_sub(2);
+        for i in 0..self.sessions.len() {
+            let y = inner.y.saturating_add((i * 2) as u16);
+            if y >= inner.y + inner.height {
+                break;
+            }
+            self.hit.push((
+                Rect {
+                    x: inner.x,
+                    y,
+                    width: inner.width,
+                    height: 2,
+                },
+                Hit::Session(i),
+            ));
+        }
     }
 
     fn render_detail(&self, frame: &mut Frame, area: Rect) {
@@ -294,7 +343,7 @@ mod tests {
         KeyEvent::new(code, ratatui::crossterm::event::KeyModifiers::NONE)
     }
 
-    fn rows_rendered(state: &State) -> Vec<String> {
+    fn rows_rendered(state: &mut State) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|f| state.render(f, f.area())).unwrap();
         let buffer = terminal.backend().buffer();
@@ -308,10 +357,35 @@ mod tests {
     }
 
     #[test]
+    fn clicking_a_session_selects_and_decrypts_it() {
+        let mut state = State::new();
+        let _ = rows_rendered(&mut state);
+        let (rect, _) = state.hit[2]; // static.example.com
+        let routed = state.click(ratatui::layout::Position {
+            x: rect.x + 2,
+            y: rect.y,
+        });
+        assert_eq!(routed, "traffic:session");
+        assert_eq!(state.selection, 2);
+        assert!(state.sessions[2].decrypted(), "click runs the break");
+    }
+
+    #[test]
+    fn clicks_outside_the_list_are_inert() {
+        let mut state = State::new();
+        let _ = rows_rendered(&mut state);
+        let before = (state.selection, state.sessions[0].decrypted());
+        // Far right of the screen: the detail pane, not the list.
+        let routed = state.click(ratatui::layout::Position { x: 95, y: 5 });
+        assert_eq!(routed, "traffic:inert");
+        assert_eq!((state.selection, state.sessions[0].decrypted()), before);
+    }
+
+    #[test]
     fn sessions_list_with_host_label_and_length() {
-        let state = State::new();
+        let mut state = State::new();
         assert_eq!(state.sessions.len(), 3);
-        let text = rows_rendered(&state).join("\n");
+        let text = rows_rendered(&mut state).join("\n");
         for host in ["login.example.com", "api.example.com", "static.example.com"] {
             assert!(text.contains(host), "{host} listed");
         }
@@ -324,7 +398,7 @@ mod tests {
         let mut state = State::new();
         assert_eq!(state.selection, 0);
         assert!(
-            rows_rendered(&state)
+            rows_rendered(&mut state)
                 .join("\n")
                 .contains("login.example.com — ciphertext")
         );
@@ -333,7 +407,7 @@ mod tests {
         assert_eq!(state.selection, 2);
         // The selected (third) session's ciphertext now feeds the hex pane.
         assert!(
-            rows_rendered(&state)
+            rows_rendered(&mut state)
                 .join("\n")
                 .contains("static.example.com — ciphertext")
         );
@@ -341,7 +415,7 @@ mod tests {
         state.handle_key(press(KeyCode::Up));
         assert_eq!(state.selection, 1);
         assert!(
-            rows_rendered(&state)
+            rows_rendered(&mut state)
                 .join("\n")
                 .contains("api.example.com — ciphertext")
         );
@@ -409,14 +483,14 @@ mod tests {
         state.handle_key(press(KeyCode::Enter));
         state.tick();
         state.tick();
-        let text = rows_rendered(&state).join("\n");
+        let text = rows_rendered(&mut state).join("\n");
         assert!(text.contains("decrypted"), "status shown");
         assert!(text.contains("revealed"), "reveal counter shown");
 
         for _ in 0..100 {
             state.tick();
         }
-        let text = rows_rendered(&state).join("\n");
+        let text = rows_rendered(&mut state).join("\n");
         assert!(
             text.contains("Recovered — key 6b3f"),
             "recovered key hex shown"
@@ -436,7 +510,7 @@ mod tests {
         for _ in 0..100 {
             state.tick();
         }
-        let text = rows_rendered(&state).join("\n");
+        let text = rows_rendered(&mut state).join("\n");
         // "english" sits ~90 chars into the plaintext; the pane's first row
         // holds ~56 — it only renders if the paragraph wraps.
         assert!(text.contains("english"), "deep plaintext wraps into view");

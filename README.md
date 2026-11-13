@@ -42,6 +42,7 @@ Pre-alpha — currently a skeleton. Roadmap:
 ## Getting started
 
 Requires Rust (2024 edition); [just](https://github.com/casey/just) is optional.
+Mouse supported: click tabs to switch modes, click list rows to select and run, click the math chart's halves to cycle samples.
 
 ```sh
 cargo run    # or: just run

@@ -76,12 +76,13 @@ impl HarnessState {
     }
 
     /// Render the current state and flatten the buffer to text rows,
-    /// trailing blank cells trimmed.
-    fn snapshot_text(&self) -> String {
+    /// trailing blank cells trimmed. Rendering with `&mut` also refreshes
+    /// the app's hit areas, so `send_click` tests what was drawn.
+    fn snapshot_text(&mut self) -> String {
         let mut terminal = Terminal::new(TestBackend::new(self.cols, self.rows))
             .expect("test backend needs no tty");
         terminal
-            .draw(|frame| ui::render(frame, &self.app))
+            .draw(|frame| ui::render(frame, &mut self.app))
             .expect("draw into test backend");
         let buffer = terminal.backend().buffer();
         (0..buffer.area.height)
@@ -140,6 +141,18 @@ fn tool_descriptors() -> Value {
                     }
                 },
                 "required": ["key"]
+            }
+        },
+        {
+            "name": "send_click",
+            "description": "Send a left-click at (row, column) through the app's real shell-then-mode mouse dispatch.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "row": { "type": "integer", "minimum": 0 },
+                    "column": { "type": "integer", "minimum": 0 }
+                },
+                "required": ["row", "column"]
             }
         },
         {
@@ -255,6 +268,29 @@ fn call_tool(state: &mut HarnessState, params: &Value) -> Result<Value, String> 
                 json!({ "routed": routed, "quit": state.app.should_quit }).to_string(),
             ))
         }
+        "send_click" => {
+            let row = args
+                .get("row")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| "arguments.row is required".to_string())?;
+            let column = args
+                .get("column")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| "arguments.column is required".to_string())?;
+            if row < 0 || column < 0 || row >= state.rows as i64 || column >= state.cols as i64 {
+                return Err(format!(
+                    "coordinates must be within 0..{} rows and 0..{} cols",
+                    state.rows, state.cols
+                ));
+            }
+            // Refresh hit areas so the click tests what a client last saw.
+            let _ = state.snapshot_text();
+            let routed = state.app.mouse_click(ratatui::layout::Position {
+                x: column as u16,
+                y: row as u16,
+            });
+            Ok(tool_text(json!({ "routed": routed }).to_string()))
+        }
         "tick" => {
             let n = match args.get("n") {
                 None => 1,
@@ -358,7 +394,10 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, ["send_key", "tick", "snapshot", "reset"]);
+        assert_eq!(
+            names,
+            ["send_key", "send_click", "tick", "snapshot", "reset"]
+        );
     }
 
     #[test]
@@ -427,6 +466,62 @@ mod tests {
     }
 
     #[test]
+    fn send_click_switches_tabs_and_starts_attacks() {
+        let mut state = HarnessState::new();
+        // Tab 3 ("3: Lessons") sits in the tab row; its exact rect comes
+        // from a forced render.
+        let tab3 = {
+            let _ = state.snapshot_text();
+            state.app.tab_hits[2].0
+        };
+        let resp = call(
+            &mut state,
+            "send_click",
+            json!({ "row": tab3.y, "column": tab3.x + 1 }),
+        );
+        assert_eq!(
+            tool_text_of(&resp),
+            "{\"routed\":\"shell:tab\"}",
+            "tab click routes to the shell"
+        );
+        assert_eq!(state.app.mode, crate::app::Mode::Lessons);
+
+        // A body click on autocrack's first victim starts the attack.
+        let mut state = HarnessState::new();
+        let victim_rect = {
+            let _ = state.snapshot_text();
+            state.app.autocrack.hit[0].0
+        };
+        call(
+            &mut state,
+            "send_click",
+            json!({ "row": victim_rect.y, "column": victim_rect.x + 2 }),
+        );
+        assert!(matches!(
+            state.app.autocrack.phase,
+            crate::modes::autocrack::Phase::Running(_)
+        ));
+    }
+
+    #[test]
+    fn send_click_rejects_out_of_range_coordinates() {
+        let mut state = HarnessState::new();
+        for (row, column) in [(999, 5), (5, 999), (-1, 0), (0, -1)] {
+            let resp = call(
+                &mut state,
+                "send_click",
+                json!({ "row": row, "column": column }),
+            );
+            assert!(is_error(&resp), "({row}, {column}) rejected");
+        }
+        assert_eq!(
+            state.app.mode,
+            crate::app::Mode::Autocrack,
+            "state unchanged"
+        );
+    }
+
+    #[test]
     fn tick_bounds_are_enforced() {
         let mut state = HarnessState::new();
         for bad in [0, -1, 1001, 10_000] {
@@ -437,7 +532,7 @@ mod tests {
 
     #[test]
     fn snapshot_shows_the_victim_list() {
-        let state = HarnessState::new();
+        let mut state = HarnessState::new();
         let text = state.snapshot_text();
         assert!(text.contains("Pick a victim"));
         assert!(text.contains("Caesar (shift 11)"));

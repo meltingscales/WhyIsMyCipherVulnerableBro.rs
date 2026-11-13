@@ -87,7 +87,7 @@ impl Victim {
 }
 
 /// Which screen the mode is on.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Phase {
     /// Choosing a victim; the index selects into [`VICTIMS`].
     Select { selection: usize },
@@ -106,7 +106,7 @@ pub struct Row {
 /// A live attack. `advance` pushes the next row; when the plan is exhausted
 /// the run is `done` and carries the recovered key and plaintext (for
 /// classical victims) or the structural result and leak (for the attack demos).
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Run {
     pub victim: Victim,
     pub ciphertext: String,
@@ -412,10 +412,19 @@ impl Run {
     }
 }
 
+/// What a click on the last rendered frame meant, per recorded rect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Hit {
+    /// A victim row in the selection list: click selects and starts.
+    Victim(usize),
+}
+
 /// Autocrack screen state.
 #[derive(Debug)]
 pub struct State {
     pub phase: Phase,
+    /// Clickable rects recorded by the last render (immediate-mode hits).
+    pub(crate) hit: Vec<(Rect, Hit)>,
     /// Test seam: the last key routed here (only the active mode receives keys).
     pub(crate) last_key: Option<KeyEvent>,
     /// Test seam: ticks received while this mode is active.
@@ -426,6 +435,7 @@ impl State {
     pub fn new() -> Self {
         Self {
             phase: Phase::Select { selection: 0 },
+            hit: Vec::new(),
             last_key: None,
             tick_count: 0,
         }
@@ -473,14 +483,33 @@ impl State {
         "Up/Dn victim · Enter run · r reset"
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect) {
+    /// Handle a routed left-click: on the victim list, clicking a row
+    /// selects that victim and starts its attack; running attacks are inert.
+    pub fn click(&mut self, pos: ratatui::layout::Position) -> &'static str {
         match &self.phase {
-            Phase::Select { selection } => self.render_select(frame, area, *selection),
-            Phase::Running(run) => self.render_run(frame, area, run),
+            Phase::Select { .. } => {
+                if let Some(&(_, Hit::Victim(index))) =
+                    self.hit.iter().find(|(rect, _)| rect.contains(pos))
+                {
+                    let victim = VICTIMS[index];
+                    self.phase = Phase::Running(Box::new(Run::new(victim)));
+                    "autocrack:victim"
+                } else {
+                    "autocrack:inert"
+                }
+            }
+            Phase::Running(_) => "autocrack:inert",
         }
     }
 
-    fn render_select(&self, frame: &mut Frame, area: Rect, selection: usize) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
+        match self.phase {
+            Phase::Select { selection } => self.render_select(frame, area, selection),
+            Phase::Running(ref run) => self.render_run(frame, area, run),
+        }
+    }
+
+    fn render_select(&mut self, frame: &mut Frame, area: Rect, selection: usize) {
         let items: Vec<ListItem> = VICTIMS
             .iter()
             .map(|&victim| {
@@ -499,6 +528,33 @@ impl State {
             .block(Block::bordered().title(" Pick a victim cipher "))
             .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
         frame.render_stateful_widget(list, area, &mut { list_state });
+
+        // Each victim item is three rows (name, blurb, blank) from the
+        // list's inner top; record them as the clickable rows.
+        self.hit.clear();
+        let inner = {
+            let mut inner = area;
+            inner.x += 1;
+            inner.y += 1;
+            inner.width = inner.width.saturating_sub(2);
+            inner.height = inner.height.saturating_sub(2);
+            inner
+        };
+        for (i, _) in VICTIMS.iter().enumerate() {
+            let y = inner.y.saturating_add((i * 3) as u16);
+            if y >= inner.y + inner.height {
+                break;
+            }
+            self.hit.push((
+                Rect {
+                    x: inner.x,
+                    y,
+                    width: inner.width,
+                    height: 3,
+                },
+                Hit::Victim(i),
+            ));
+        }
     }
 
     fn render_run(&self, frame: &mut Frame, area: Rect, run: &Run) {
@@ -597,7 +653,7 @@ mod tests {
         KeyEvent::new(code, ratatui::crossterm::event::KeyModifiers::NONE)
     }
 
-    fn rows_rendered(state: &State) -> Vec<String> {
+    fn rows_rendered(state: &mut State) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(90, 30)).unwrap();
         terminal.draw(|f| state.render(f, f.area())).unwrap();
         let buffer = terminal.backend().buffer();
@@ -608,6 +664,43 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    /// Render once to record hit areas, then click a victim row.
+    fn click_victim(index: usize) -> Phase {
+        let mut state = State::new();
+        let _ = rows_rendered(&mut state);
+        let (rect, _) = state.hit[index];
+        state.click(ratatui::layout::Position {
+            x: rect.x + 2,
+            y: rect.y + 1,
+        });
+        state.phase.clone()
+    }
+
+    #[test]
+    fn clicking_a_victim_selects_and_starts_it() {
+        match click_victim(0) {
+            Phase::Running(run) => assert_eq!(run.victim, Victim::Caesar),
+            other => panic!("click should start the attack, got {other:?}"),
+        }
+        match click_victim(2) {
+            Phase::Running(run) => assert_eq!(run.victim, Victim::Sweet32),
+            other => panic!("click should start the attack, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clicks_while_running_are_inert() {
+        let mut state = State::new();
+        state.handle_key(press(KeyCode::Enter));
+        let _ = rows_rendered(&mut state);
+        let routed = state.click(ratatui::layout::Position { x: 5, y: 5 });
+        assert_eq!(routed, "autocrack:inert");
+        match &state.phase {
+            Phase::Running(run) => assert!(run.rows.is_empty(), "attack untouched"),
+            other => panic!("expected running, got {other:?}"),
+        }
     }
 
     #[test]
@@ -717,14 +810,14 @@ mod tests {
     #[test]
     fn sweet32_screens_render_counters_and_done_result() {
         let mut state = State::new();
-        let text = rows_rendered(&state).join("\n");
+        let text = rows_rendered(&mut state).join("\n");
         assert!(text.contains("SWEET32 (birthday attack)"), "victim listed");
 
         state.handle_key(press(KeyCode::Down));
         state.handle_key(press(KeyCode::Down));
         state.handle_key(press(KeyCode::Enter));
         state.tick();
-        let text = rows_rendered(&state).join("\n");
+        let text = rows_rendered(&mut state).join("\n");
         assert!(text.contains("Blocks sent"), "block counter while running");
         assert!(text.contains("collisions"), "stats rows stream");
 
@@ -736,7 +829,7 @@ mod tests {
             }
             state.tick();
         }
-        let text = rows_rendered(&state).join("\n");
+        let text = rows_rendered(&mut state).join("\n");
         assert!(text.contains("Result:   birthday collision after"));
         assert!(text.contains("Leak:     leaked cookie: "));
         assert!(text.contains("COLLISION"));
@@ -814,7 +907,7 @@ mod tests {
     #[test]
     fn export_attacks_render_counters_and_done_chains() {
         let mut state = State::new();
-        let text = rows_rendered(&state).join("\n");
+        let text = rows_rendered(&mut state).join("\n");
         assert!(text.contains("FREAK (export RSA)"), "victim listed");
         assert!(text.contains("Logjam (export DHE)"), "victim listed");
 
@@ -824,7 +917,7 @@ mod tests {
         }
         state.handle_key(press(KeyCode::Enter));
         state.tick();
-        let text = rows_rendered(&state).join("\n");
+        let text = rows_rendered(&mut state).join("\n");
         assert!(text.contains("ClientHello"), "downgrade narrated");
         for _ in 0..60 {
             if let Phase::Running(run) = &state.phase
@@ -834,7 +927,7 @@ mod tests {
             }
             state.tick();
         }
-        let text = rows_rendered(&state).join("\n");
+        let text = rows_rendered(&mut state).join("\n");
         assert!(text.contains("rho"), "solver rows streamed");
         assert!(text.contains("Result:   N = "), "factored result");
         assert!(
@@ -856,7 +949,7 @@ mod tests {
             }
             state.tick();
         }
-        let text = rows_rendered(&state).join("\n");
+        let text = rows_rendered(&mut state).join("\n");
         assert!(
             text.contains("Result:   y = 314159265"),
             "exponent recovered"
@@ -904,8 +997,8 @@ mod tests {
 
     #[test]
     fn select_screen_lists_victims_with_ciphertext_previews() {
-        let state = State::new();
-        let text = rows_rendered(&state).join("\n");
+        let mut state = State::new();
+        let text = rows_rendered(&mut state).join("\n");
         assert!(text.contains("Caesar (shift 11)"));
         assert!(text.contains("Vigenère (key \"lemon\")"));
         assert!(text.contains("Pick a victim"));
@@ -918,7 +1011,7 @@ mod tests {
         for _ in 0..3 {
             state.tick();
         }
-        let text = rows_rendered(&state).join("\n");
+        let text = rows_rendered(&mut state).join("\n");
         assert!(text.contains("running"));
         assert!(text.contains("shift  0"));
 
@@ -928,7 +1021,7 @@ mod tests {
             }
             state.tick();
         }
-        let text = rows_rendered(&state).join("\n");
+        let text = rows_rendered(&mut state).join("\n");
         assert!(text.contains("done"));
         assert!(text.contains("Key:      shift 11"));
         assert!(text.contains("Plaintext: Cryptanalysis"));

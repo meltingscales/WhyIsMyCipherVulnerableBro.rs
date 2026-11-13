@@ -56,6 +56,8 @@ pub struct App {
     pub traffic: modes::traffic::State,
     pub lessons: modes::lessons::State,
     pub mathviews: modes::mathviews::State,
+    /// Clickable tab-bar rects, recorded by the last `ui::render` frame.
+    pub(crate) tab_hits: Vec<(ratatui::layout::Rect, usize)>,
 }
 
 impl Default for App {
@@ -67,6 +69,7 @@ impl Default for App {
             traffic: modes::traffic::State::new(),
             lessons: modes::lessons::State::new(),
             mathviews: modes::mathviews::State::new(),
+            tab_hits: Vec::new(),
         }
     }
 }
@@ -113,6 +116,22 @@ impl App {
             Mode::TrafficSimulator => self.traffic.tick(),
             Mode::Lessons => self.lessons.tick(),
             Mode::MathViews => self.mathviews.tick(),
+        }
+    }
+
+    /// Route a left-click: the tab bar is shell chrome and claimed first;
+    /// everything else reaches only the active mode's click handler.
+    /// Returns where the click went, like `send_key` reports its routing.
+    pub fn mouse_click(&mut self, pos: ratatui::layout::Position) -> &'static str {
+        if let Some(&(_, index)) = self.tab_hits.iter().find(|(rect, _)| rect.contains(pos)) {
+            self.mode = Mode::at(index);
+            return "shell:tab";
+        }
+        match self.mode {
+            Mode::Autocrack => self.autocrack.click(pos),
+            Mode::TrafficSimulator => self.traffic.click(pos),
+            Mode::Lessons => self.lessons.click(pos),
+            Mode::MathViews => self.mathviews.click(pos),
         }
     }
 }
@@ -177,6 +196,41 @@ mod tests {
         assert!(!app.should_quit);
         app.quit();
         assert!(app.should_quit);
+    }
+
+    /// Render the shell once (records tab rects), then click a tab.
+    fn click_tab(mut app: App, index: usize) -> Mode {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let (rect, _) = app.tab_hits[index];
+        app.mouse_click(ratatui::layout::Position {
+            x: rect.x + 1,
+            y: rect.y,
+        });
+        app.mode
+    }
+
+    #[test]
+    fn tab_clicks_switch_modes_and_body_clicks_stay_in_mode() {
+        assert_eq!(click_tab(App::new(), 2), Mode::Lessons);
+        assert_eq!(click_tab(App::new(), 3), Mode::MathViews);
+
+        // A body click reaches only the active mode (autocrack starts).
+        let mut app = App::new();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(frame, &mut app))
+            .unwrap();
+        let routed = app.mouse_click(ratatui::layout::Position { x: 10, y: 10 });
+        assert_eq!(routed, "autocrack:victim");
+        assert!(matches!(
+            app.autocrack.phase,
+            crate::modes::autocrack::Phase::Running(_)
+        ));
     }
 
     #[test]

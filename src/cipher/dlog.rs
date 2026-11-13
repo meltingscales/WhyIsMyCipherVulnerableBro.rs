@@ -78,6 +78,7 @@ pub fn expected_steps() -> f64 {
 
 /// Baby-step giant-step over a prime-order-ish group, with the step counter
 /// the demo streams. Deterministic for fixed (p, g, target).
+#[derive(Clone)]
 pub struct BsgsSolver {
     p: u64,
     g: u64,

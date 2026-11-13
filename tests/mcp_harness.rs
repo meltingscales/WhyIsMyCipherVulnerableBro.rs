@@ -87,7 +87,10 @@ fn harness_drives_full_scenarios_end_to_end() {
         .iter()
         .map(|t| t["name"].as_str().expect("name"))
         .collect();
-    assert_eq!(names, ["send_key", "tick", "snapshot", "reset"]);
+    assert_eq!(
+        names,
+        ["send_key", "send_click", "tick", "snapshot", "reset"]
+    );
 
     // Error paths leave state intact.
     assert!(h.call(3, "send_key", json!({ "key": "make coffee" }))["error"].is_object());
@@ -181,6 +184,52 @@ fn harness_drives_full_scenarios_end_to_end() {
         snapshot.contains("session: GET /export HTTP/1.1"),
         "session decrypted"
     );
+
+    // Mouse scenario: click the Lessons tab, then click a lesson row.
+    h.call(30, "reset", json!({}));
+    let tab3 = {
+        let resp = h.call(31, "snapshot", json!({}));
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        // Tab row is screen row 1 (0-based); find the Lessons tab's column
+        // by locating its rendered title in that row.
+        let row = text.lines().nth(1).unwrap();
+        let col = row.find("3: Lessons").expect("lessons tab rendered") as i64;
+        (1i64, col)
+    };
+    let resp = h.call(
+        32,
+        "send_click",
+        json!({ "row": tab3.0, "column": tab3.1 + 2 }),
+    );
+    assert!(
+        resp["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("shell:tab"),
+        "tab click routed to the shell"
+    );
+    let snapshot = h.snapshot_text(33);
+    assert!(snapshot.contains("Lessons"), "lessons mode active");
+    assert!(!snapshot.contains("Birthday collisions"), "not math views");
+
+    // Click the SWEET32 lesson row: find its screen row by its title.
+    let resp = h.call(34, "snapshot", json!({}));
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let (lesson_row, col) = text
+        .lines()
+        .enumerate()
+        .find_map(|(y, line)| line.find("SWEET32").map(|x| (y as i64, x as i64)))
+        .expect("lesson row rendered");
+    h.call(
+        35,
+        "send_click",
+        json!({ "row": lesson_row, "column": col }),
+    );
+    let snapshot = h.snapshot_text(36);
+    assert!(snapshot.contains("step 1 of"), "lesson opened by click");
+
+    // Out-of-range click errors and leaves state intact.
+    assert!(h.call(37, "send_click", json!({ "row": 999, "column": 5 }))["error"].is_object());
 }
 
 #[test]

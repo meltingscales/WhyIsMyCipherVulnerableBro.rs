@@ -63,6 +63,7 @@ pub fn expected_iterations() -> f64 {
 /// the iteration counter the demo streams. Deterministic: fixed walk.
 ///
 /// `PartialEq`/`Debug` expose the observable attack state.
+#[derive(Clone)]
 pub struct RhoSolver {
     modulus: u64,
     tortoise: u64,
