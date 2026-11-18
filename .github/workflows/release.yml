@@ -61,17 +61,19 @@ jobs:
             cp "$bin" "dist/$stem/"
           fi
           cp README.md "dist/$stem/"
+      # Archive from outside dist/ — tar refuses to read a directory
+      # while the archive is being written into it.
       - name: Archive (tar.gz)
         if: matrix.archive == 'tar.gz'
-        run: tar -czf "dist/artifact.tar.gz" -C dist .
+        run: tar -czf artifact.tar.gz -C dist .
       - name: Archive (zip)
         if: matrix.archive == 'zip'
         shell: bash
-        run: cd dist && zip -r artifact.zip .
+        run: cd dist && zip -r ../artifact.zip .
       - uses: actions/upload-artifact@v4
         with:
           name: binary-${{ matrix.target }}
-          path: dist/artifact.*
+          path: artifact.*
 
   publish:
     name: publish
