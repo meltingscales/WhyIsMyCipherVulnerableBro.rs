@@ -66,18 +66,26 @@ jobs:
           cp README.md "dist/$stem/"
       # Archive from outside dist/ — tar refuses to read a directory
       # while the archive is being written into it.
+      # The archive FILE name must be per-target: publish merges all
+      # workflow artifacts into one directory before attaching them.
       - name: Archive (tar.gz)
         if: matrix.archive == 'tar.gz'
-        run: tar -czf artifact.tar.gz -C dist .
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          stem="why_is_my_cipher_vulnerable_bro-v${version}-${{ matrix.target }}"
+          tar -czf "$stem.tar.gz" -C dist "$stem"
       # git-bash on windows runners has no zip(1); PowerShell does it.
       - name: Archive (zip)
         if: matrix.archive == 'zip'
         shell: pwsh
-        run: Compress-Archive -Path dist/* -DestinationPath artifact.zip
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          $stem = "why_is_my_cipher_vulnerable_bro-v$version-${{ matrix.target }}"
+          Compress-Archive -Path "dist/$stem" -DestinationPath "$stem.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: binary-${{ matrix.target }}
-          path: artifact.*
+          path: why_is_my_cipher_vulnerable_bro-*
 
   publish:
     name: publish
