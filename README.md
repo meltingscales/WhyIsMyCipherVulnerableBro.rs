@@ -1,5 +1,7 @@
 # WhyIsMyCipherVulnerableBro.rs
 
+[![ci](https://github.com/meltingscales/WhyIsMyCipherVulnerableBro.rs/actions/workflows/ci.yml/badge.svg)](https://github.com/meltingscales/WhyIsMyCipherVulnerableBro.rs/actions/workflows/ci.yml)
+
 > "Why is my cipher vulnerable, bro?" — find out, visually, in your terminal.
 
 A Rust TUI (built with [ratatui](https://ratatui.rs)) for exploring the **math
@@ -38,6 +40,11 @@ Pre-alpha — currently a skeleton. Roadmap:
 - [ ] Autocrack mode with visuals
 - [ ] Cryptopals-style lessons
 - [ ] More fun-to-watch vulnerabilities with interesting math (suggestions welcome)
+
+## Downloads
+
+Prebuilt binaries for Linux (x86_64), macOS (x86_64 and Apple silicon), and
+Windows (x86_64) are attached to every [release](https://github.com/meltingscales/WhyIsMyCipherVulnerableBro.rs/releases) — no Rust toolchain needed.
 
 ## Getting started
 

@@ -1,0 +1,91 @@
+# Releases: on a v* tag, build optimized binaries for every target, then
+# publish only after the whole matrix succeeds. Native runners (not cross)
+# keep the mac/windows toolchains reliable; pinned macos labels because the
+# -latest alias has drifted architectures before.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Stage
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          stem="why_is_my_cipher_vulnerable_bro-v${version}-${{ matrix.target }}"
+          mkdir "dist/$stem"
+          bin="target/${{ matrix.target }}/release/why_is_my_cipher_vulnerable_bro"
+          if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then
+            cp "$bin.exe" "dist/$stem/"
+          else
+            cp "$bin" "dist/$stem/"
+          fi
+          cp README.md "dist/$stem/"
+      - name: Archive (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        run: tar -czf "dist/artifact.tar.gz" -C dist .
+      - name: Archive (zip)
+        if: matrix.archive == 'zip'
+        shell: bash
+        run: cd dist && zip -r artifact.zip .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: dist/artifact.*
+
+  publish:
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create release with all archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/* --title "$TAG" --generate-notes
