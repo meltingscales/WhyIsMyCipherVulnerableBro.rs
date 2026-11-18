@@ -66,10 +66,11 @@ jobs:
       - name: Archive (tar.gz)
         if: matrix.archive == 'tar.gz'
         run: tar -czf artifact.tar.gz -C dist .
+      # git-bash on windows runners has no zip(1); PowerShell does it.
       - name: Archive (zip)
         if: matrix.archive == 'zip'
-        shell: bash
-        run: cd dist && zip -r ../artifact.zip .
+        shell: pwsh
+        run: Compress-Archive -Path dist/* -DestinationPath artifact.zip
       - uses: actions/upload-artifact@v4
         with:
           name: binary-${{ matrix.target }}
