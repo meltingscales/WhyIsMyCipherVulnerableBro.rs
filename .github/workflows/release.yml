@@ -53,7 +53,7 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           stem="why_is_my_cipher_vulnerable_bro-v${version}-${{ matrix.target }}"
-          mkdir "dist/$stem"
+          mkdir -p "dist/$stem"
           bin="target/${{ matrix.target }}/release/why_is_my_cipher_vulnerable_bro"
           if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then
             cp "$bin.exe" "dist/$stem/"
